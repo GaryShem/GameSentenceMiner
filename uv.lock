@@ -1301,7 +1301,7 @@ requires-dist = [
     { name = "soundfile", specifier = ">=0.14.0,<0.15.0" },
     { name = "tokenizers", specifier = "==0.23.1" },
     { name = "toml", specifier = "~=0.10.2" },
-    { name = "uv", specifier = "==0.12.4" },
+    { name = "uv", specifier = ">=0.12.4,<0.13" },
     { name = "waitress", specifier = "==3.0.2" },
     { name = "watchdog", specifier = "~=6.0.0" },
     { name = "websockets", specifier = ">=16.1,<16.2.0" },
