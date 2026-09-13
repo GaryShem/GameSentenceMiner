@@ -178,6 +178,8 @@ def _refresh_rollups_for_dates(dates):
 
 
 def _delete_line_ids_batched(line_ids, chunk_size=500):
+    from GameSentenceMiner.util.text_log import game_log
+
     unique_line_ids = [line_id for line_id in dict.fromkeys(line_ids) if line_id]
     if not unique_line_ids:
         return {"deleted_count": 0, "failed_ids": []}
@@ -195,8 +197,19 @@ def _delete_line_ids_batched(line_ids, chunk_size=500):
             )
             # Preserve existing behavior: count attempted IDs on successful DB operation.
             deleted_count += len(chunk)
+
+            for line_id in chunk:
+                try:
+                    game_log.remove_by_id(line_id)
+                except Exception as log_error:
+                    logger.warning(
+                        f"Deleted line {line_id} from database but failed to remove it "
+                        f"from live text context: {log_error}"
+                    )
+
         except Exception as batch_error:
             logger.warning(f"Batch delete failed, falling back to per-row deletes: {batch_error}")
+
             for line_id in chunk:
                 try:
                     GameLinesTable._db.execute(
@@ -205,6 +218,15 @@ def _delete_line_ids_batched(line_ids, chunk_size=500):
                         commit=True,
                     )
                     deleted_count += 1
+
+                    try:
+                        game_log.remove_by_id(line_id)
+                    except Exception as log_error:
+                        logger.warning(
+                            f"Deleted line {line_id} from database but failed to remove it "
+                            f"from live text context: {log_error}"
+                        )
+
                 except Exception as row_error:
                     logger.warning(f"Failed to delete line {line_id}: {row_error}")
                     failed_ids.append(line_id)
