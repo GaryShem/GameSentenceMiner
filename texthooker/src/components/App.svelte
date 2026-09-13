@@ -982,28 +982,61 @@
 		$uniqueLines$.delete(removedLine.text);
 	}
 
-	function removeLines() {
-		const linesToDelete = new Set(selectedLineIds);
-		const newActionHistory: LineItem[] = [];
+	async function removeLines() {
+		const requestedIds = [...selectedLineIds];
 
-		$lineData$ = $lineData$.filter((oldLine, index) => {
-			const hasLine = linesToDelete.has(oldLine.id);
+		if (!requestedIds.length) {
+			return;
+		}
 
-			linesToDelete.delete(oldLine.id);
+		try {
+			const response = await fetch(getGSMEndpoint('/api/remove-live-context-lines'), {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ line_ids: requestedIds }),
+			});
 
-			if (hasLine) {
-				newActionHistory.push({ ...oldLine, index: index - newActionHistory.length });
-				$uniqueLines$.delete(oldLine.text);
+			if (!response.ok) {
+				throw new Error(`HTTP error! Status: ${response.status}`);
 			}
 
-			return !hasLine;
-		});
+			const result = await response.json();
+			const contextAbsentIds = new Set<string>(result.context_absent_ids ?? []);
 
-		selectedLineIds = linesToDelete.size ? [...linesToDelete] : [];
+			if (!contextAbsentIds.size) {
+				return;
+			}
 
-		if (newActionHistory.length) {
-			rememberRemovedGSMLines(newActionHistory);
-			$actionHistory$ = [...$actionHistory$, newActionHistory];
+			const removedLines: LineItem[] = [];
+
+			$lineData$ = $lineData$.filter((oldLine) => {
+				const shouldRemove = contextAbsentIds.has(oldLine.id);
+
+				if (shouldRemove) {
+					removedLines.push(oldLine);
+					$uniqueLines$.delete(oldLine.text);
+				}
+
+				return !shouldRemove;
+			});
+
+			selectedLineIds = selectedLineIds.filter((id) => !contextAbsentIds.has(id));
+
+			if (removedLines.length) {
+				rememberRemovedGSMLines(removedLines);
+
+				// This operation permanently removes these lines from live context
+				// for the current GSM session, so it must not be visually undoable.
+				$actionHistory$ = [];
+			}
+		} catch (error) {
+			console.error('Error removing selected lines from live context:', error);
+
+			$openDialog$ = {
+				type: 'error',
+				message: 'Could not remove the selected lines from GSM context.',
+				showCancel: false,
+			};
 		}
 	}
 

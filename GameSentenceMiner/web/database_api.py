@@ -882,6 +882,56 @@ def register_database_api_routes(app):
             logger.error(f"Error in sentence search: {e}")
             return jsonify({"error": "Search failed"}), 500
 
+
+    @app.route("/api/remove-live-context-lines", methods=["POST"])
+    def api_remove_live_context_lines():
+        """
+        Remove lines from the live GameText context without deleting them
+        from the statistics database.
+        """
+        try:
+            data = request.get_json(silent=True) or {}
+            line_ids = data.get("line_ids", [])
+
+            if not line_ids:
+                return jsonify({"error": "No line IDs provided"}), 400
+
+            if not isinstance(line_ids, list):
+                return jsonify({"error": "line_ids must be a list"}), 400
+
+            from GameSentenceMiner.util.text_log import game_log
+
+            requested_ids = [line_id for line_id in dict.fromkeys(line_ids) if line_id]
+            removed_ids = []
+            already_absent_ids = []
+
+            for line_id in requested_ids:
+                if game_log.remove_by_id(line_id) is not None:
+                    removed_ids.append(line_id)
+                else:
+                    # The desired final state is still satisfied:
+                    # this line is not part of the live context.
+                    already_absent_ids.append(line_id)
+
+            logger.debug(
+                "Removed %d live context lines; %d were already absent",
+                len(removed_ids),
+                len(already_absent_ids),
+            )
+
+            return jsonify(
+                {
+                    "removed_ids": removed_ids,
+                    "already_absent_ids": already_absent_ids,
+                    "context_absent_ids": requested_ids,
+                }
+            ), 200
+
+        except Exception as e:
+            logger.exception(f"Failed to remove lines from live context: {e}")
+            return jsonify({"error": "Failed to remove lines from live context"}), 500
+
+
     @app.route("/api/games-list")
     def api_games_list():
         """
