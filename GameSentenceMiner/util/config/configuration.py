@@ -803,6 +803,13 @@ class Anki:
         "picture": AnkiField(name="Picture", enabled=True, overwrite=True, append=False, core=True),
         "word": AnkiField(name="Expression", enabled=True, overwrite=True, append=False, core=True),
         "previous_sentence": AnkiField(name="", enabled=True, overwrite=False, append=False, core=False),
+        "translation_context": AnkiField(
+            name="",
+            enabled=True,
+            overwrite=True,
+            append=False,
+            core=False,
+        ),
         "previous_image": AnkiField(name="", enabled=True, overwrite=True, append=False, core=False),
         "video": AnkiField(name="", enabled=True, overwrite=True, append=False, core=False),
         "sentence_furigana": AnkiField(
@@ -821,6 +828,7 @@ class Anki:
         "picture_field": "picture",
         "word_field": "word",
         "previous_sentence_field": "previous_sentence",
+        "translation_context_field": "translation_context",
         "previous_image_field": "previous_image",
         "video_field": "video",
         "sentence_furigana_field": "sentence_furigana",
@@ -859,6 +867,15 @@ class Anki:
     previous_sentence: AnkiField = field(
         default_factory=lambda: AnkiField(name="", enabled=True, overwrite=False, append=False)
     )
+    translation_context: AnkiField = field(
+        default_factory=lambda: AnkiField(
+            name="",
+            enabled=True,
+            overwrite=True,
+            append=False,
+        )
+    )
+    translation_context_line_count: int = 10
     previous_image: AnkiField = field(
         default_factory=lambda: AnkiField(name="", enabled=True, overwrite=True, append=False)
     )
@@ -2235,6 +2252,11 @@ class Config:
             self.sync_shared_field(config.anki, profile.anki, "previous_sentence_field_enabled")
             self.sync_shared_field(config.anki, profile.anki, "previous_sentence_field_overwrite")
             self.sync_shared_field(config.anki, profile.anki, "previous_sentence_field_append")
+            self.sync_shared_field(config.anki, profile.anki, "translation_context_field")
+            self.sync_shared_field(config.anki, profile.anki, "translation_context_field_enabled")
+            self.sync_shared_field(config.anki, profile.anki, "translation_context_field_overwrite")
+            self.sync_shared_field(config.anki, profile.anki, "translation_context_field_append")
+            self.sync_shared_field(config.anki, profile.anki, "translation_context_line_count")
             self.sync_shared_field(config.anki, profile.anki, "previous_image_field")
             self.sync_shared_field(config.anki, profile.anki, "previous_image_field_enabled")
             self.sync_shared_field(config.anki, profile.anki, "previous_image_field_overwrite")

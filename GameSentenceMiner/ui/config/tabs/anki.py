@@ -180,6 +180,19 @@ def build_anki_general_tab(window: ConfigWindow, i18n: dict) -> QWidget:
         ),
     )
     fields_layout.addRow(
+        "Translation Context",
+        _create_field_mapping_row(
+            window.translation_context_field_edit,
+            window.translation_context_field_enabled_check,
+            window.translation_context_field_overwrite_check,
+            window.translation_context_field_append_check,
+        ),
+    )
+    fields_layout.addRow(
+        "Translation Context Lines",
+        window.translation_context_line_count_spin,
+    )
+    fields_layout.addRow(
         window._create_labeled_widget(tabs_i18n, "anki", "previous_image_field"),
         _create_field_mapping_row(
             window.previous_image_field_edit,

@@ -856,6 +856,13 @@ class ConfigWindow(QWidget):
                         overwrite=self.previous_sentence_field_overwrite_check.isChecked(),
                         append=self.previous_sentence_field_append_check.isChecked(),
                     ),
+                    translation_context=AnkiField(
+                        name=self.translation_context_field_edit.currentText(),
+                        enabled=self.translation_context_field_enabled_check.isChecked(),
+                        overwrite=self.translation_context_field_overwrite_check.isChecked(),
+                        append=self.translation_context_field_append_check.isChecked(),
+                    ),
+                    translation_context_line_count=self.translation_context_line_count_spin.value(),
                     previous_image=AnkiField(
                         name=self.previous_image_field_edit.currentText(),
                         enabled=self.previous_image_field_enabled_check.isChecked(),
@@ -1514,6 +1521,10 @@ class ConfigWindow(QWidget):
         self.picture_field_edit = self._create_anki_field_combo()
         self.word_field_edit = self._create_anki_field_combo()
         self.previous_sentence_field_edit = self._create_anki_field_combo()
+        self.translation_context_field_edit = self._create_anki_field_combo()
+        self.translation_context_line_count_spin = QSpinBox()
+        self.translation_context_line_count_spin.setRange(1, 100)
+        self.translation_context_line_count_spin.setValue(10)
         self.previous_image_field_edit = self._create_anki_field_combo()
         self.game_name_field_edit = self._create_anki_field_combo()
         self.video_field_edit = self._create_anki_field_combo()
@@ -1530,6 +1541,9 @@ class ConfigWindow(QWidget):
         self.previous_sentence_field_enabled_check = QCheckBox()
         self.previous_sentence_field_overwrite_check = QCheckBox()
         self.previous_sentence_field_append_check = QCheckBox()
+        self.translation_context_field_enabled_check = QCheckBox()
+        self.translation_context_field_overwrite_check = QCheckBox()
+        self.translation_context_field_append_check = QCheckBox()
         self.previous_image_field_enabled_check = QCheckBox()
         self.previous_image_field_overwrite_check = QCheckBox()
         self.previous_image_field_append_check = QCheckBox()
@@ -1938,6 +1952,26 @@ class ConfigWindow(QWidget):
         self.binder.bind(
             ("profile", "anki", "previous_sentence_field_append"),
             self.previous_sentence_field_append_check,
+        )
+        self.binder.bind(
+            ("profile", "anki", "translation_context_field"),
+            self.translation_context_field_edit,
+        )
+        self.binder.bind(
+            ("profile", "anki", "translation_context_field_enabled"),
+            self.translation_context_field_enabled_check,
+        )
+        self.binder.bind(
+            ("profile", "anki", "translation_context_field_overwrite"),
+            self.translation_context_field_overwrite_check,
+        )
+        self.binder.bind(
+            ("profile", "anki", "translation_context_field_append"),
+            self.translation_context_field_append_check,
+        )
+        self.binder.bind(
+            ("profile", "anki", "translation_context_line_count"),
+            self.translation_context_line_count_spin,
         )
         self.binder.bind(("profile", "anki", "previous_image_field"), self.previous_image_field_edit)
         self.binder.bind(
@@ -2714,6 +2748,10 @@ class ConfigWindow(QWidget):
                 self.previous_sentence_field_append_check,
             ),
             (
+                self.translation_context_field_overwrite_check,
+                self.translation_context_field_append_check,
+            ),
+            (
                 self.previous_image_field_overwrite_check,
                 self.previous_image_field_append_check,
             ),
@@ -2874,6 +2912,7 @@ class ConfigWindow(QWidget):
             self.picture_field_edit,
             self.word_field_edit,
             self.previous_sentence_field_edit,
+            self.translation_context_field_edit,
             self.previous_image_field_edit,
             self.video_field_edit,
             self.sentence_furigana_field_edit,
@@ -3148,6 +3187,8 @@ class ConfigWindow(QWidget):
         self.picture_field_edit.setCurrentText(s.anki.picture_field)
         self.word_field_edit.setCurrentText(s.anki.word_field)
         self.previous_sentence_field_edit.setCurrentText(s.anki.previous_sentence_field)
+        self.translation_context_field_edit.setCurrentText(s.anki.translation_context_field)
+        self.translation_context_line_count_spin.setValue(s.anki.translation_context_line_count)
         self.previous_image_field_edit.setCurrentText(s.anki.previous_image_field)
         self.game_name_field_edit.setCurrentText(s.anki.game_name_field)
         self.video_field_edit.setCurrentText(s.anki.video_field)
@@ -3166,6 +3207,9 @@ class ConfigWindow(QWidget):
         self.previous_sentence_field_enabled_check.setChecked(s.anki.previous_sentence_field_enabled)
         self.previous_sentence_field_overwrite_check.setChecked(s.anki.previous_sentence_field_overwrite)
         self.previous_sentence_field_append_check.setChecked(s.anki.previous_sentence_field_append)
+        self.translation_context_field_enabled_check.setChecked(s.anki.translation_context_field_enabled)
+        self.translation_context_field_overwrite_check.setChecked(s.anki.translation_context_field_overwrite)
+        self.translation_context_field_append_check.setChecked(s.anki.translation_context_field_append)
         self.previous_image_field_enabled_check.setChecked(s.anki.previous_image_field_enabled)
         self.previous_image_field_overwrite_check.setChecked(s.anki.previous_image_field_overwrite)
         self.previous_image_field_append_check.setChecked(s.anki.previous_image_field_append)

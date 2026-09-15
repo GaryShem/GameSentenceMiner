@@ -2821,6 +2821,36 @@ def get_initial_card_info(
             previous_sentence_text,
             append_separator=get_config().advanced.multi_line_line_break,
         )
+    if _field_is_active("translation_context_field"):
+        context_line = (
+            selected_lines[0].prev
+            if selected_lines and selected_lines[0].prev
+            else game_line.prev
+        )
+
+        context_lines = []
+        max_context_lines = max(
+            1,
+            get_config().anki.translation_context_line_count,
+        )
+
+        while context_line and len(context_lines) < max_context_lines:
+            context_lines.append(context_line.text)
+            context_line = context_line.prev
+
+        if context_lines:
+            context_lines.reverse()
+            translation_context_text = get_config().advanced.multi_line_line_break.join(
+                context_lines
+            )
+
+            _apply_field_policy(
+                note,
+                last_note,
+                "translation_context_field",
+                translation_context_text,
+                append_separator=get_config().advanced.multi_line_line_break,
+            )
     return note, last_note
 
 
