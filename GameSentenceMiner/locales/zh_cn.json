@@ -261,6 +261,14 @@
             "label": "上一句字段:",
             "tooltip": "Anki 中用于上一句对话的字段。如果为空，则不填充。"
           },
+          "translation_context_field": {
+            "label": "翻译上下文:",
+            "tooltip": "用于保存前文台词作为翻译上下文的 Anki 字段。留空则不会填充。"
+          },
+          "translation_context_line_count": {
+            "label": "翻译上下文行数:",
+            "tooltip": "翻译上下文字段中保存的前文台词的最大行数。"
+          },
           "previous_image_field": {
             "label": "上一句截图字段:",
             "tooltip": "Anki 中用于上一句截图的字段。如果为空，则不填充。"

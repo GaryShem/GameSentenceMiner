@@ -261,6 +261,14 @@
             "label": "Campo de Oración Anterior:",
             "tooltip": "Campo en Anki para la línea de diálogo anterior. Si está vacío, no se poblará"
           },
+          "translation_context_field": {
+            "label": "Contexto de traducción:",
+            "tooltip": "Campo de Anki para guardar líneas de diálogo anteriores como contexto para la traducción. Si está vacío, no se rellenará."
+          },
+          "translation_context_line_count": {
+            "label": "Líneas de contexto de traducción:",
+            "tooltip": "Número máximo de líneas anteriores que se guardarán en el campo de contexto de traducción."
+          },
           "previous_image_field": {
             "label": "Campo de Captura de Línea de Voz Anterior:",
             "tooltip": "Campo en Anki para la captura de pantalla de la línea anterior. Si está vacío, no se poblará"

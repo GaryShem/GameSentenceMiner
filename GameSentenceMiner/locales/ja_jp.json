@@ -260,6 +260,14 @@
             "label": "前の文章フィールド:",
             "tooltip": "前のセリフを保存するフィールド。空欄で無効。"
           },
+          "translation_context_field": {
+            "label": "翻訳コンテキスト:",
+            "tooltip": "翻訳用のコンテキストとして直前のセリフを保存するAnkiフィールド。空欄の場合は保存されません。"
+          },
+          "translation_context_line_count": {
+            "label": "翻訳コンテキストの行数:",
+            "tooltip": "翻訳コンテキストフィールドに保存する直前のセリフの最大行数。"
+          },
           "previous_image_field": {
             "label": "前の画像フィールド:",
             "tooltip": "前のセリフの画像を保存するフィールド。空欄で無効。"

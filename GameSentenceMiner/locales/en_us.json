@@ -271,6 +271,14 @@
             "label": "Previous Sentence:",
             "tooltip": "Field in Anki for the previous line of dialogue. If Empty, will not populate"
           },
+          "translation_context_field": {
+            "label": "Translation Context:",
+            "tooltip": "Field in Anki for previous lines of dialogue to provide context for translation. If empty, will not populate."
+          },
+          "translation_context_line_count": {
+            "label": "Translation Context Lines:",
+            "tooltip": "Maximum number of previous lines to save in the translation context field."
+          },
           "previous_image_field": {
             "label": "Previous VoiceLine SS:",
             "tooltip": "Field in Anki for the screenshot of previous line. If Empty, will not populate"

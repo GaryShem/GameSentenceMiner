@@ -265,6 +265,14 @@
             "label": "이전 문장:",
             "tooltip": "Anki의 이전 대화 줄 필드입니다. 비어 있으면 채워지지 않습니다."
           },
+          "translation_context_field": {
+            "label": "번역 문맥:",
+            "tooltip": "번역 문맥으로 이전 대사를 저장할 Anki 필드입니다. 비워 두면 저장하지 않습니다."
+          },
+          "translation_context_line_count": {
+            "label": "번역 문맥 줄 수:",
+            "tooltip": "번역 문맥 필드에 저장할 이전 대사의 최대 줄 수입니다."
+          },
           "previous_image_field": {
             "label": "이전 보이스라인 스크린샷:",
             "tooltip": "Anki의 이전 줄 스크린샷 필드입니다. 비어 있으면 채워지지 않습니다."
