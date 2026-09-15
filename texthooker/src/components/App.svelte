@@ -990,7 +990,7 @@
 		}
 
 		try {
-			const response = await fetch(getGSMEndpoint('/api/remove-live-context-lines'), {
+			const response = await fetch(getGSMEndpoint('/api/delete-sentence-lines'), {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ line_ids: requestedIds }),
@@ -1001,16 +1001,19 @@
 			}
 
 			const result = await response.json();
-			const contextAbsentIds = new Set<string>(result.context_absent_ids ?? []);
+			const failedIds = new Set<string>(result.failed_ids ?? []);
+			const deletedIds = new Set(
+				requestedIds.filter((id) => !failedIds.has(id))
+			);
 
-			if (!contextAbsentIds.size) {
+			if (!deletedIds.size) {
 				return;
 			}
 
 			const removedLines: LineItem[] = [];
 
 			$lineData$ = $lineData$.filter((oldLine) => {
-				const shouldRemove = contextAbsentIds.has(oldLine.id);
+				const shouldRemove = deletedIds.has(oldLine.id);
 
 				if (shouldRemove) {
 					removedLines.push(oldLine);
@@ -1020,21 +1023,21 @@
 				return !shouldRemove;
 			});
 
-			selectedLineIds = selectedLineIds.filter((id) => !contextAbsentIds.has(id));
+			selectedLineIds = selectedLineIds.filter((id) => !deletedIds.has(id));
 
 			if (removedLines.length) {
 				rememberRemovedGSMLines(removedLines);
 
-				// This operation permanently removes these lines from live context
-				// for the current GSM session, so it must not be visually undoable.
+				// These lines were permanently deleted, so don't allow
+				// the UI undo stack to visually resurrect them.
 				$actionHistory$ = [];
 			}
 		} catch (error) {
-			console.error('Error removing selected lines from live context:', error);
+			console.error('Error deleting selected lines from GSM:', error);
 
 			$openDialog$ = {
 				type: 'error',
-				message: 'Could not remove the selected lines from GSM context.',
+				message: 'Could not delete the selected lines from GSM.',
 				showCancel: false,
 			};
 		}
@@ -1344,7 +1347,7 @@
 			if (Number(numberOfLinesToTranslate) < ids.length) {
 				ids = ids.slice(-Number(numberOfLinesToTranslate));
 			}
-			
+
 			const response = await fetch(getGSMEndpoint('/translate-multiple'), {
 				method: 'POST',
 				headers: {
@@ -1352,7 +1355,7 @@
 				},
 				body: JSON.stringify({ ids }),
 			});
-			
+
 			if (response.ok) {
 				const result = await response.text();
 				// Add the translation result as a normal websocket event without adding to lineIDs
@@ -1483,7 +1486,7 @@
 		on:click={() => window.open('/overview', '_blank')}
 		/>
 	</div>
-	
+
 	<Icon
 		class="cursor-pointer mr-1 hover:text-primary md:mr-2"
 		path={mdiCog}
@@ -1536,8 +1539,8 @@
 			on:videoTrim={handleVideoTrim}
 		/>
 	{/each}
-	
-	
+
+
 </main>
 
 {#if showScrollToNewest}
