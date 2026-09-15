@@ -20,12 +20,17 @@ from GameSentenceMiner.util.config.configuration import (
     AI_OLLAMA,
     AI_OPENAI,
     AI_DEEPL,
+    AI_GOOGLE_TRANSLATE,
     Ai,
     General,
 )
 from GameSentenceMiner.util.gsm_utils import is_connected
 from GameSentenceMiner.util.text_log import GameLine
 
+DIRECT_TRANSLATION_PROVIDERS = {
+    AI_DEEPL,
+    AI_GOOGLE_TRANSLATE,
+}
 
 @dataclass(frozen=True)
 class AIConfigSnapshot:
@@ -47,7 +52,7 @@ def _is_local_url(url: str) -> bool:
 
 
 def _requires_internet(config: Ai) -> bool:
-    if config.provider in {AI_GEMINI, AI_GROQ, AI_GSM_CLOUD, AI_DEEPL}:
+    if config.provider in {AI_GOOGLE_TRANSLATE, AI_GEMINI, AI_GROQ, AI_GSM_CLOUD, AI_DEEPL}:
         return True
     if config.provider == AI_OPENAI:
         return not _is_local_url(config.open_ai_url)
@@ -81,6 +86,14 @@ class AIService:
         ai_cfg = self.config_snapshot.ai
         provider = ai_cfg.provider
         model = self._get_model_for_provider(ai_cfg)
+
+        metadata = None
+
+        if provider == AI_GOOGLE_TRANSLATE:
+            metadata = {
+                "target_lang": self.config_snapshot.general.native_language,
+            }
+
         return AIRequest(
             provider=provider,
             model=model,
@@ -89,6 +102,7 @@ class AIService:
             top_p=ai_cfg.top_p,
             max_tokens=ai_cfg.max_output_tokens,
             request_kind=request_kind,
+            metadata=metadata,
         )
 
     @staticmethod
@@ -107,6 +121,8 @@ class AIService:
             return config.lm_studio_model
         if config.provider == AI_DEEPL:  # ← ADD THIS
             return "deepl"
+        if config.provider == AI_GOOGLE_TRANSLATE:
+            return "google-translate"
         return ""
 
     @staticmethod
@@ -121,7 +137,7 @@ class AIService:
             return config.ollama_backup_model
         if config.provider == AI_LM_STUDIO:
             return config.lm_studio_backup_model
-        if config.provider == AI_DEEPL:  # (DeepL doesn't have backup models)
+        if config.provider in DIRECT_TRANSLATION_PROVIDERS: # DeepL and Google Translate don't have backup models
             return ""
         return ""
 
@@ -220,17 +236,18 @@ class AIService:
             character_context=character_context,
         )
 
-        self.logger.debug(f"DeepL Prompt being sent: {full_prompt[:500]}")
+        self.logger.debug(f"Translation prompt built: {full_prompt[:500]}")
 
         # NOTE:
         # DeepL is now primarily handled directly in prefetch_ai_translation() (anki.py)
         # to avoid going through the LLM prompt pipeline.
         # This branch is kept for compatibility with other flows (e.g. manual translate).
 
-        if self.config_snapshot.ai.provider == AI_DEEPL:
-            # DeepL should only receive the raw sentence
+        if self.config_snapshot.ai.provider in DIRECT_TRANSLATION_PROVIDERS:
             prompt_to_send = sentence
-            self.logger.debug(f"SENTENCE SENT TO DEEPL: {sentence}")
+            self.logger.debug(
+                f"RAW SENTENCE SENT TO {self.config_snapshot.ai.provider}: {sentence}"
+            )
         else:
             prompt_to_send = full_prompt
 

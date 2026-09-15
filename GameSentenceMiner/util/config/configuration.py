@@ -39,6 +39,7 @@ AI_OLLAMA = "Ollama"
 AI_LM_STUDIO = "LM Studio"
 AI_GSM_CLOUD = "GSM Cloud"
 AI_DEEPL = "DeepL"
+AI_GOOGLE_TRANSLATE = "Google Translate"
 
 GSM_CLOUD_DEFAULT_MODEL = "gpt-4.1-nano-2025-04-14"
 GSM_CLOUD_PREVIEW_ENV = "GSM_CLOUD_PREVIEW"
@@ -1377,6 +1378,8 @@ class Ai:
 
     def __post_init__(self):
         provider_alias_map = {
+            "google translate": AI_GOOGLE_TRANSLATE,
+            "google_translate": AI_GOOGLE_TRANSLATE,
             "gemini": AI_GEMINI,
             "groq": AI_GROQ,
             "openai": AI_OPENAI,
@@ -1470,6 +1473,8 @@ class Ai:
         if self.provider == AI_GSM_CLOUD and self.gsm_cloud_access_token and self.get_gsm_cloud_primary_model():
             return True
         if self.provider == AI_DEEPL and self.deepl_api_key:
+            return True
+        if self.provider == AI_GOOGLE_TRANSLATE:
             return True
         return False
 

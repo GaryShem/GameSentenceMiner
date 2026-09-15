@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from GameSentenceMiner.ai.providers.base import ProviderClient
 
 from GameSentenceMiner.util.config.configuration import (
+    AI_GOOGLE_TRANSLATE,
     AI_GEMINI,
     AI_GROQ,
     AI_GSM_CLOUD,
@@ -159,6 +160,23 @@ class ProviderRegistry:
                     api_key=config.deepl_api_key,
                     logger=self.logger,
                     target_lang=config.deepl_target_lang,  # ← Pass from config
+                )
+
+            return self._clients[key]
+
+        if config.provider == AI_GOOGLE_TRANSLATE:
+            from GameSentenceMiner.ai.providers.google_translate_client import GoogleTranslateClient
+
+            key = self._build_key(
+                config.provider,
+                "google-translate",
+                None,
+                None,
+            )
+
+            if key not in self._clients:
+                self._clients[key] = GoogleTranslateClient(
+                    logger=self.logger,
                 )
 
             return self._clients[key]

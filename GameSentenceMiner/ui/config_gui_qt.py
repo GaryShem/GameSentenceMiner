@@ -132,6 +132,7 @@ from GameSentenceMiner.util.config.configuration import (
     AI_LM_STUDIO,
     AI_GSM_CLOUD,
     AI_DEEPL,
+    AI_GOOGLE_TRANSLATE,
     GSM_CLOUD_DEFAULT_MODEL,
     is_gsm_cloud_preview_enabled,
     save_full_config,
@@ -2106,7 +2107,15 @@ class ConfigWindow(QWidget):
             self.gsm_cloud_model_list.blockSignals(False)
 
     def _get_available_ai_providers(self) -> list[str]:
-        providers = [AI_GEMINI, AI_GROQ, AI_OPENAI, AI_OLLAMA, AI_LM_STUDIO, AI_DEEPL]
+        providers = [
+            AI_GEMINI,
+            AI_GROQ,
+            AI_OPENAI,
+            AI_OLLAMA,
+            AI_LM_STUDIO,
+            AI_DEEPL,
+            AI_GOOGLE_TRANSLATE,
+        ]
         if self._is_gsm_cloud_ai_preview_enabled() and self._is_gsm_cloud_authenticated():
             providers.append(AI_GSM_CLOUD)
         return providers
