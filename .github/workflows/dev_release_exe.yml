@@ -35,7 +35,7 @@ jobs:
       - name: Compute next pre-release version
         id: version
         run: |
-          VERSION=$(node scripts/compute-version.cjs --pre-release --preid beta)
+          VERSION=$(node scripts/compute-version.cjs --pre-release --preid fwiffo-custom)
           echo "Computed pre-release version: $VERSION"
           echo "PACKAGE_VERSION=$VERSION" >> "$GITHUB_OUTPUT"
 
