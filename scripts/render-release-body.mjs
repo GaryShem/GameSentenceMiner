@@ -32,7 +32,10 @@ function parseArgs(argv) {
 }
 
 function ensureVersion(version) {
-  if (!version || !/^\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
+  if (
+    !version ||
+    !/^\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)
+  ) {
     throw new Error(`Invalid or missing --version: ${version ?? ""}`);
   }
 }

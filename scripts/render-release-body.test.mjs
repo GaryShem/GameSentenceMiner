@@ -43,6 +43,22 @@ test("renderPrereleaseBody warns users away from prereleases", () => {
   );
 });
 
+test("renderPrereleaseBody accepts versions with build metadata", () => {
+  const body = renderPrereleaseBody({
+    repo: "bpwhelan/GameSentenceMiner",
+    version: "2026.9.3+fwiffo.custom.1",
+  });
+
+  assert.match(
+    body,
+    /GameSentenceMiner-Setup-2026\.9\.3\+fwiffo\.custom\.1\.exe/
+  );
+  assert.match(
+    body,
+    /releases\/download\/v2026\.9\.3\+fwiffo\.custom\.1\//
+  );
+});
+
 test("renderStableReleaseBody appends bundled changelog with release image URLs", () => {
   const body = renderStableReleaseBody({
     repo: "bpwhelan/GameSentenceMiner",
