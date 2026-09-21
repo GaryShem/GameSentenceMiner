@@ -9,10 +9,12 @@
 //   node scripts/compute-version.cjs --pre-release
 //   node scripts/compute-version.cjs --pre-release --preid beta
 //   node scripts/compute-version.cjs --pre-release --preid rc
+//   node scripts/compute-version.cjs --local --local-id fwiffo.custom
 //
 // Output:
 //   Stable:      <latest stable release with its last numeric segment incremented>
 //   Pre-release: <next stable version>-<preid>.N
+//   Local:       <next stable version>+<local-id>.N
 //
 // How it works:
 //   Stable:      Finds the highest stable vX.Y.Z... tag and increments its last
@@ -26,6 +28,7 @@ const { execSync } = require('child_process');
 
 const STABLE_TAG_PATTERN = /^v(\d+(?:\.\d+)*)$/;
 const PRE_RELEASE_TAG_PATTERN = /^v(\d+(?:\.\d+)*)-([0-9a-z-]+)\.(\d+)$/;
+const LOCAL_VERSION_TAG_PATTERN = /^v(\d+(?:\.\d+)*)\+([0-9a-z]+(?:\.[0-9a-z]+)*)\.(\d+)$/;
 
 function getArgValue(argv, flagName) {
     const inlinePrefix = `${flagName}=`;
@@ -46,6 +49,14 @@ function validatePreReleaseId(preReleaseId) {
     if (!/^[0-9a-z-]+$/.test(preReleaseId)) {
         throw new Error(
             `Invalid --preid "${preReleaseId}". Use only lowercase letters, numbers, and "-".`,
+        );
+    }
+}
+
+function validateLocalId(localId) {
+    if (!/^[0-9a-z]+(?:\.[0-9a-z]+)*$/.test(localId)) {
+        throw new Error(
+            `Invalid --local-id "${localId}". Use lowercase letters, numbers, and "."-separated labels.`,
         );
     }
 }
@@ -121,6 +132,27 @@ function parsePreReleaseTag(tag) {
     };
 }
 
+function parseLocalVersionTag(tag) {
+    const match = LOCAL_VERSION_TAG_PATTERN.exec(tag);
+    if (!match) {
+        return null;
+    }
+
+    const version = match[1];
+    const parts = parseVersionParts(version);
+    if (!parts) {
+        return null;
+    }
+
+    return {
+        tag,
+        version,
+        parts,
+        localId: match[2],
+        localVersionNumber: Number.parseInt(match[3], 10),
+    };
+}
+
 function getLatestStableRelease(tags) {
     let latest = null;
 
@@ -142,7 +174,7 @@ function getLatestVersionBase(tags) {
     let latest = null;
 
     for (const tag of tags) {
-        const parsed = parseStableTag(tag) ?? parsePreReleaseTag(tag);
+        const parsed = parseStableTag(tag) ?? parsePreReleaseTag(tag) ?? parseLocalVersionTag(tag);
         if (!parsed) {
             continue;
         }
@@ -186,6 +218,30 @@ function computePreReleaseVersion({ preReleaseId = 'beta', tags = [] } = {}) {
     return `${stableVersion}-${preReleaseId}.${highestPreRelease + 1}`;
 }
 
+function computeLocalVersion({ localId, tags = [] } = {}) {
+    validateLocalId(localId);
+
+    const stableVersion = computeStableVersion({ tags });
+    let highestLocalVersion = 0;
+
+    for (const tag of tags) {
+        const parsed = parseLocalVersionTag(tag);
+        if (!parsed) {
+            continue;
+        }
+
+        if (parsed.version !== stableVersion || parsed.localId !== localId) {
+            continue;
+        }
+
+        if (parsed.localVersionNumber > highestLocalVersion) {
+            highestLocalVersion = parsed.localVersionNumber;
+        }
+    }
+
+    return `${stableVersion}+${localId}.${highestLocalVersion + 1}`;
+}
+
 function fetchVersionTags() {
     try {
         execSync('git fetch --tags --force 2>&1', { encoding: 'utf8', stdio: 'pipe' });
@@ -199,8 +255,19 @@ function fetchVersionTags() {
 
 function runCli(argv = process.argv.slice(2)) {
     const isPreRelease = argv.includes('--pre-release');
+    const isLocal = argv.includes('--local');
     const preReleaseId = (getArgValue(argv, '--preid') || 'beta').toLowerCase();
+    const localId = getArgValue(argv, '--local-id').toLowerCase();
     const tags = fetchVersionTags();
+
+    if (isPreRelease && isLocal) {
+        throw new Error('Use either --pre-release or --local, not both.');
+    }
+
+    if (isLocal) {
+        process.stdout.write(computeLocalVersion({ localId, tags }));
+        return;
+    }
 
     if (!isPreRelease) {
         process.stdout.write(computeStableVersion({ tags }));
@@ -222,6 +289,7 @@ if (require.main === module) {
 module.exports = {
     bumpPatch,
     compareVersionParts,
+    computeLocalVersion,
     computePreReleaseVersion,
     computeStableVersion,
     fetchVersionTags,
@@ -229,8 +297,10 @@ module.exports = {
     getLatestStableRelease,
     getLatestVersionBase,
     parsePreReleaseTag,
+    parseLocalVersionTag,
     parseStableTag,
     parseVersionParts,
     runCli,
     validatePreReleaseId,
+    validateLocalId,
 };

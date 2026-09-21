@@ -32,11 +32,11 @@ jobs:
         id: overlay_server_source
         run: echo "OVERLAY_SERVER_SOURCE_TREE=$(git rev-parse HEAD:GSM_Overlay/input_server)" >> "$GITHUB_OUTPUT"
 
-      - name: Compute next pre-release version
+      - name: Compute next custom version
         id: version
         run: |
-          VERSION=$(node scripts/compute-version.cjs --pre-release --preid fwiffo-custom)
-          echo "Computed pre-release version: $VERSION"
+          VERSION=$(node scripts/compute-version.cjs --local --local-id fwiffo.custom)
+          echo "Computed custom version: $VERSION"
           echo "PACKAGE_VERSION=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Render prerelease body

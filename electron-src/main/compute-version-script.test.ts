@@ -5,10 +5,15 @@ const require = createRequire(import.meta.url);
 const {
     computeStableVersion,
     computePreReleaseVersion,
+    computeLocalVersion,
 } = require('../../scripts/compute-version.cjs') as {
     computeStableVersion: (options?: { tags?: string[] }) => string;
     computePreReleaseVersion: (options: {
         preReleaseId?: string;
+        tags?: string[];
+    }) => string;
+    computeLocalVersion: (options: {
+        localId: string;
         tags?: string[];
     }) => string;
 };
@@ -45,5 +50,19 @@ describe('compute-version script', () => {
                 tags: ['v2026.3.22.2', 'v2026.3.22.3-beta.1', 'v2026.3.22.3-rc.2'],
             }),
         ).toBe('2026.3.22.3-rc.3');
+    });
+
+    it('increments PEP 440-compatible local versions for custom builds', () => {
+        expect(
+            computeLocalVersion({
+                localId: 'fwiffo.custom',
+                tags: [
+                    'v2026.3.22.2',
+                    'v2026.3.22.3+fwiffo.custom.1',
+                    'v2026.3.22.3+fwiffo.custom.4',
+                    'v2026.3.22.3+someone.else.8',
+                ],
+            }),
+        ).toBe('2026.3.22.3+fwiffo.custom.5');
     });
 });
