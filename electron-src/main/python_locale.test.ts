@@ -17,6 +17,7 @@ describe('Python display locale sync', () => {
         expect(toPythonLocale('zh')).toBe('zh_cn');
         expect(toPythonLocale('ko')).toBe('ko_kr');
         expect(toPythonLocale('es')).toBe('es_es');
+        expect(toPythonLocale('ru')).toBe('ru_ru');
         expect(toPythonLocale('unknown')).toBe('en_us');
     });
 

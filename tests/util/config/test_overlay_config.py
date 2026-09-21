@@ -254,7 +254,7 @@ def test_process_pausing_is_profile_scoped_round_trip():
 def test_overlay_locales_include_use_ocr_result_strings():
     root = Path(__file__).resolve().parents[3]
     locales_dir = root / "GameSentenceMiner" / "locales"
-    locale_names = ("en_us", "ja_jp", "zh_cn", "es_es", "ko_kr", "ukr_ua")
+    locale_names = ("en_us", "ja_jp", "zh_cn", "es_es", "ko_kr", "ukr_ua", "ru_ru")
 
     for locale_name in locale_names:
         locale_data = json.loads((locales_dir / f"{locale_name}.json").read_text(encoding="utf-8"))

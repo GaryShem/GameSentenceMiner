@@ -238,10 +238,10 @@ class Locale(Enum):
     Українська = "ukr_ua"
     中文 = "zh_cn"
     Español = "es_es"
+    Русский = "ru_ru"
     # Français = 'fr_fr'
     # Deutsch = 'de_de'
     # Italiano = 'it_it'
-    # Русский = 'ru_ru'
 
     @classmethod
     def from_any(cls, value: str) -> "Locale":
@@ -261,6 +261,7 @@ class Locale(Enum):
             "zh": cls.中文.value,
             "cn": cls.中文.value,
             "es": cls.Español.value,
+            "ru": cls.Русский.value,
         }
         value_lower = aliases.get(value_lower, value_lower)
         for locale in cls:

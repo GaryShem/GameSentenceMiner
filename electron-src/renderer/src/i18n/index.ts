@@ -11,7 +11,10 @@ type DeepPartial<T> = {
   [K in keyof T]?: T[K] extends Record<string, unknown> ? DeepPartial<T[K]> : T[K];
 };
 
-const locales: Record<string, DeepPartial<TranslationMap>> = { en, ja, ukr, zh, ko, es };
+// Russian currently covers the Python configuration UI. Keeping an empty
+// renderer catalog here enables the shared selector while retaining the
+// existing per-key English fallback for Electron-only screens.
+const locales: Record<string, DeepPartial<TranslationMap>> = { en, ja, ukr, zh, ko, es, ru: {} };
 
 export const SUPPORTED_LOCALES: Array<{ code: string; label: string }> = [
   { code: "en", label: "English" },
@@ -20,6 +23,7 @@ export const SUPPORTED_LOCALES: Array<{ code: string; label: string }> = [
   { code: "zh", label: "中文" },
   { code: "ko", label: "한국어" },
   { code: "es", label: "Español" },
+  { code: "ru", label: "Русский" },
 ];
 
 /**

@@ -9,6 +9,7 @@ export const ELECTRON_TO_PYTHON_LOCALE: Record<string, string> = {
     zh: 'zh_cn',
     ko: 'ko_kr',
     es: 'es_es',
+    ru: 'ru_ru',
 };
 
 export function toPythonLocale(locale: string): string {
