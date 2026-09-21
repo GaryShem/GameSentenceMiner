@@ -3269,7 +3269,9 @@ def _process_next_anki_beacon_note(timeout_seconds: float = 0.0) -> bool:
 
     note_key = _get_anki_beacon_note_key(session_id, note_id)
     try:
-        update_new_cards({note_id})
+        processed_note_ids = update_new_cards({note_id})
+        if processed_note_ids is not None and note_id not in processed_note_ids:
+            raise RuntimeError(f"Anki note {note_id} was not queued for media processing")
         previous_note_ids.add(note_id)
         gsm_status.anki_connected = True
         return True
@@ -3319,29 +3321,73 @@ def check_for_new_cards():
             )
             last_connection_error = datetime.now()
         return False
+    if first_run:
+        previous_note_ids.update(current_note_ids)
+        first_run = False
+        return True
+
     new_card_ids = current_note_ids - previous_note_ids
-    if new_card_ids and not first_run:
+    if new_card_ids:
         try:
-            update_new_cards(new_card_ids)
+            processed_note_ids = update_new_cards(new_card_ids)
+            if processed_note_ids is None:
+                processed_note_ids = new_card_ids
+            previous_note_ids.update(processed_note_ids)
         except Exception as e:
             logger.error("Error updating new card, Reason:", e)
-    first_run = False
-    previous_note_ids.update(new_card_ids)  # Update the list of known notes
     return True
 
 
 def update_new_cards(new_card_ids):
-    """Process multiple new cards by looping through each card ID."""
-    # Get info for all new cards
-    cards_info = invoke("notesInfo", notes=list(new_card_ids))
+    """Process new cards in creation order and return the handled note IDs."""
+    cards_info = invoke("notesInfo", notes=sorted(new_card_ids))
+    processed_note_ids = set()
 
     for card_dict in cards_info:
+        note_id = card_dict.get("noteId")
+        card = None
         try:
             card = AnkiCard.from_dict(card_dict)
-            update_single_card(card)
+            queued = update_single_card(card)
+            if queued is not False:
+                processed_note_ids.add(card.noteId)
         except Exception as e:
-            logger.error(f"Error processing card {card_dict.get('noteId', 'unknown')}: {e}")
+            if card:
+                try:
+                    gsm_status.remove_word_being_processed(card.get_field(get_config().anki.word_field))
+                except Exception:
+                    pass
+            logger.error(f"Error processing card {note_id or 'unknown'}: {e}")
             continue
+    return processed_note_ids
+
+
+def _selected_lines_match_card(card, lines) -> bool:
+    """Return whether the current texthooker selection belongs to this card.
+
+    Yomitan can finish creating a note after the user has already selected a
+    different line.  The selection is page-global state, so only use it when at
+    least one selected line, or the combined selection, matches the new note.
+    """
+    if not card or not lines:
+        return False
+
+    sentence = remove_html_and_cloze_tags(get_sentence(card))
+    if not sentence:
+        return False
+
+    line_texts = [str(getattr(line, "text", "") or "") for line in lines if line]
+    candidates = [text for text in line_texts if text]
+    if len(candidates) > 1:
+        candidates.append("".join(candidates))
+
+    normalized_sentence = _normalize_for_signature(sentence)
+    for candidate in candidates:
+        if lines_match(candidate, sentence):
+            return True
+        if normalized_sentence and _normalize_for_signature(candidate) == normalized_sentence:
+            return True
+    return False
 
 
 def _is_overlay_mine(card) -> bool:
@@ -3360,7 +3406,7 @@ def _resolve_mined_line_for_card(card, lines):
     overlay_line = getattr(gsm_state, "last_overlay_scan_line", None)
     anki_sentence = remove_html_and_cloze_tags(get_sentence(card)) if card else ""
     overlay_mine = _is_overlay_mine(card)
-    matching_lines = lines
+    matching_lines = lines or None
     if overlay_mine:
         available_lines = list(lines or get_all_lines())
         overlay_source = getattr(TextSource, "OVERLAY", "overlay")
@@ -3392,10 +3438,18 @@ def update_single_card(card):
     """Process a single card (extracted from update_new_card for reusability)."""
     timing_start = time.perf_counter()
     if not card or not check_tags_for_should_update(card):
-        return
+        return True
     gsm_status.add_word_being_processed(card.get_field(get_config().anki.word_field))
     logger.debug(f"last mined line: {gsm_state.last_mined_line}, current sentence: {get_sentence(card)}")
-    lines = _get_texthooking_page_module().get_selected_lines()
+    lines = list(_get_texthooking_page_module().get_selected_lines() or [])
+    reset_texthooker_selection = True
+    if lines and not _selected_lines_match_card(card, lines):
+        logger.info(
+            f"Ignoring stale texthooker selection while processing delayed Anki note {card.noteId}; "
+            "matching the note against text history instead."
+        )
+        lines = []
+        reset_texthooker_selection = False
     game_line = _resolve_mined_line_for_card(card, lines)
     game_line.mined_time = datetime.now()
     current_word = card.get_field(get_config().anki.word_field) if card else ""
@@ -3490,7 +3544,9 @@ def update_single_card(card):
                 **reuse_kwargs,
             )
         )
-        _get_texthooking_page_module().reset_checked_lines()
+        if reset_texthooker_selection:
+            _get_texthooking_page_module().reset_checked_lines()
+        return True
     else:
         logger.info("New card(s) detected! Added to Processing Queue!")
         gsm_state.last_mined_line = game_line
@@ -3500,7 +3556,12 @@ def update_single_card(card):
         }
         if timing_context is not None:
             queue_kwargs["timing_context"] = timing_context
-        queue_card_for_processing(card, lines, game_line, **queue_kwargs)
+        if not reset_texthooker_selection:
+            queue_kwargs["reset_texthooker_selection"] = False
+        queued = queue_card_for_processing(card, lines, game_line, **queue_kwargs)
+        if not queued:
+            gsm_status.remove_word_being_processed(current_word)
+        return queued
 
 
 def queue_card_for_processing(
@@ -3510,6 +3571,7 @@ def queue_card_for_processing(
     reuse_audio_result_id: Optional[str] = None,
     reuse_screenshot_result_id: Optional[str] = None,
     timing_context: Optional[AnkiCardTimingContext] = None,
+    reset_texthooker_selection: bool = True,
 ):
     current_word = last_card.get_field(get_config().anki.word_field) if last_card else ""
     if timing_context is None:
@@ -3557,11 +3619,12 @@ def queue_card_for_processing(
         logger.error(reason)
         _mark_anki_update_failure(last_mined_line.id if last_mined_line else None, reason, current_word)
         _notify_anki_enhancement_failure(reason)
-        return
+        return False
     reuse_key = _build_sentence_audio_key(last_mined_line, lines)
     previous_entry = sentence_audio_cache.get(reuse_key) if reuse_key else None
     _set_sentence_audio_cache_entry(reuse_key, last_mined_line.id, current_word)
-    _get_texthooking_page_module().reset_checked_lines()
+    if reset_texthooker_selection:
+        _get_texthooking_page_module().reset_checked_lines()
     log_anki_card_timing(
         timing_context,
         "anki.queue_card_for_processing.queued",
@@ -3592,7 +3655,8 @@ def queue_card_for_processing(
         )
         _mark_anki_update_failure(last_mined_line.id if last_mined_line else None, reason, current_word)
         _notify_anki_enhancement_failure(reason)
-        return
+        return False
+    return True
 
 
 def update_card_from_same_sentence(

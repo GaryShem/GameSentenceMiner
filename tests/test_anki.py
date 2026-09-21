@@ -586,6 +586,58 @@ def test_resolve_mined_line_prefers_text_event_over_injected_overlay_scan(monkey
     assert calls == [([text_event], True)]
 
 
+def test_update_single_card_discards_stale_texthooker_selection(monkeypatch):
+    config = _base_config()
+    monkeypatch.setattr(anki, "get_config", lambda: config)
+
+    stale_line = SimpleNamespace(id="stale", text="次の台詞")
+    mined_line = SimpleNamespace(id="mined", text="採掘した台詞", source="hooker")
+    selected_lines = [stale_line]
+
+    class FakeCard:
+        noteId = 42
+        tags = []
+
+        def get_field(self, field):
+            return {
+                "Word": "採掘",
+                "Sentence": mined_line.text,
+            }.get(field, "")
+
+    card = FakeCard()
+    matching_calls = []
+    queue_calls = []
+    reset_calls = []
+
+    monkeypatch.setattr(
+        anki,
+        "_get_texthooking_page_module",
+        lambda: SimpleNamespace(
+            get_selected_lines=lambda: selected_lines,
+            reset_checked_lines=lambda: reset_calls.append(True),
+        ),
+    )
+
+    def fake_get_mined_line(_card, lines=None, *, prefer_recent=False):
+        matching_calls.append((lines, prefer_recent))
+        return mined_line
+
+    monkeypatch.setattr(anki, "get_mined_line", fake_get_mined_line)
+    monkeypatch.setattr(
+        anki,
+        "queue_card_for_processing",
+        lambda *args, **kwargs: queue_calls.append((args, kwargs)),
+    )
+
+    anki.update_single_card(card)
+
+    assert matching_calls == [(None, False)]
+    assert queue_calls[0][0][1] == []
+    assert queue_calls[0][0][2] is mined_line
+    assert queue_calls[0][1]["reset_texthooker_selection"] is False
+    assert reset_calls == []
+
+
 def test_set_sentence_audio_cache_entry_and_prune():
     key = ("sig", (("line-1", "sig"),), ("line-1", "sig"))
     anki._set_sentence_audio_cache_entry(key, "line-1", "word")
@@ -1167,7 +1219,7 @@ def test_check_for_new_cards_does_not_sync_cache_before_note_update_finishes(
     monkeypatch.setattr(
         anki,
         "update_new_cards",
-        lambda note_ids: calls.append(("update", set(note_ids))),
+        lambda note_ids: calls.append(("update", set(note_ids))) or set(note_ids),
     )
     monkeypatch.setattr(
         anki,
@@ -1177,6 +1229,58 @@ def test_check_for_new_cards_does_not_sync_cache_before_note_update_finishes(
 
     assert anki.check_for_new_cards() is True
     assert calls == [("update", {20})]
+    assert anki.previous_note_ids == {10, 20}
+
+
+def test_check_for_new_cards_seeds_first_poll_without_processing_existing_notes(monkeypatch):
+    monkeypatch.setattr(anki, "get_note_ids", lambda: {10, 20})
+    monkeypatch.setattr(
+        anki,
+        "update_new_cards",
+        lambda _note_ids: pytest.fail("the initial baseline must not process existing notes"),
+    )
+
+    assert anki.check_for_new_cards() is True
+    assert anki.first_run is False
+    assert anki.previous_note_ids == {10, 20}
+
+
+def test_check_for_new_cards_retries_notes_that_fail_before_queueing(monkeypatch):
+    anki.previous_note_ids = {10}
+    anki.first_run = False
+
+    monkeypatch.setattr(anki, "get_note_ids", lambda: {10, 20, 30})
+    monkeypatch.setattr(anki, "update_new_cards", lambda _note_ids: {20})
+
+    assert anki.check_for_new_cards() is True
+    assert anki.previous_note_ids == {10, 20}
+
+
+def test_update_new_cards_processes_note_ids_in_creation_order_and_reports_failures(monkeypatch):
+    invoke_calls = []
+    processed = []
+
+    def fake_invoke(action, **kwargs):
+        invoke_calls.append((action, kwargs))
+        return [{"noteId": note_id} for note_id in kwargs["notes"]]
+
+    monkeypatch.setattr(anki, "invoke", fake_invoke)
+    monkeypatch.setattr(
+        anki,
+        "AnkiCard",
+        SimpleNamespace(from_dict=lambda card_dict: SimpleNamespace(noteId=card_dict["noteId"])),
+    )
+
+    def fake_update_single_card(card):
+        processed.append(card.noteId)
+        if card.noteId == 20:
+            raise RuntimeError("text line has not arrived yet")
+
+    monkeypatch.setattr(anki, "update_single_card", fake_update_single_card)
+
+    assert anki.update_new_cards({30, 10, 20}) == {10, 30}
+    assert invoke_calls == [("notesInfo", {"notes": [10, 20, 30]})]
+    assert processed == [10, 20, 30]
 
 
 def test_record_anki_beacon_heartbeat_uses_configured_freshness_window():
