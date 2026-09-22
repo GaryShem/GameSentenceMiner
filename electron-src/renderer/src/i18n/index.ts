@@ -5,16 +5,14 @@ import ukr from "./ukr.json";
 import zh from "./zh.json";
 import ko from "./ko.json";
 import es from "./es.json";
+import ru from "./ru.json";
 
 type TranslationMap = typeof en;
 type DeepPartial<T> = {
   [K in keyof T]?: T[K] extends Record<string, unknown> ? DeepPartial<T[K]> : T[K];
 };
 
-// Russian currently covers the Python configuration UI. Keeping an empty
-// renderer catalog here enables the shared selector while retaining the
-// existing per-key English fallback for Electron-only screens.
-const locales: Record<string, DeepPartial<TranslationMap>> = { en, ja, ukr, zh, ko, es, ru: {} };
+const locales: Record<string, DeepPartial<TranslationMap>> = { en, ja, ukr, zh, ko, es, ru };
 
 export const SUPPORTED_LOCALES: Array<{ code: string; label: string }> = [
   { code: "en", label: "English" },
@@ -29,18 +27,23 @@ export const SUPPORTED_LOCALES: Array<{ code: string; label: string }> = [
 /**
  * Resolve a dot-separated key like "home.status.gsm" from a locale map.
  */
-function resolve(locale: string, key: string): string {
+function resolveFromLocale(locale: string, key: string): string | undefined {
   const parts = key.split(".");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let node: any = locales[locale] ?? locales.en;
   for (const part of parts) {
-    if (node == null || typeof node !== "object") return key;
+    if (node == null || typeof node !== "object") return undefined;
     node = node[part];
   }
-  if (typeof node === "string") return node;
+  return typeof node === "string" ? node : undefined;
+}
+
+function resolve(locale: string, key: string): string {
+  const localized = resolveFromLocale(locale, key);
+  if (localized !== undefined) return localized;
+
   // Fallback to English if the key is missing in the current locale
-  if (locale !== "en") return resolve("en", key);
-  return key;
+  return locale !== "en" ? resolveFromLocale("en", key) ?? key : key;
 }
 
 /**
