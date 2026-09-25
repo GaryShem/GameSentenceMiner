@@ -131,25 +131,34 @@ def combine_dialogue(dialogue_lines, new_lines=None):
     return new_lines
 
 
-def wait_for_stable_file(file_path, timeout=10, check_interval=0.1):
+def wait_for_stable_file(file_path, timeout=10, check_interval=0.1, stable_for=None):
     elapsed_time = 0
     last_size = -1
+    stable_time = 0
+    if stable_for is None:
+        stable_for = check_interval
 
     while elapsed_time < timeout:
         try:
             current_size = os.path.getsize(file_path)
             if current_size == last_size:
-                try:
-                    with open(file_path, "rb"):
-                        return True
-                except IOError:
-                    pass
+                stable_time += check_interval
+                if stable_time >= stable_for:
+                    try:
+                        with open(file_path, "rb"):
+                            return True
+                    except OSError:
+                        pass
+            else:
+                stable_time = 0
             last_size = current_size
         except FileNotFoundError:
             last_size = -1
+            stable_time = 0
         except Exception as e:
             logger.warning(f"Error checking file {file_path}, will retry: {e}")
             last_size = -1
+            stable_time = 0
 
         time.sleep(check_interval)
         elapsed_time += check_interval

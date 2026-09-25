@@ -135,6 +135,24 @@ def test_wait_for_stable_file_false(tmp_path):
     assert not gsm_utils.wait_for_stable_file(str(missing), timeout=0.2, check_interval=0.05)
 
 
+def test_wait_for_stable_file_requires_requested_stable_period(monkeypatch, tmp_path):
+    target = tmp_path / "replay.mkv"
+    target.write_bytes(b"video")
+    observed_sizes = iter([100, 100, 200, 200, 200])
+    size_checks = []
+
+    def fake_getsize(_path):
+        size = next(observed_sizes)
+        size_checks.append(size)
+        return size
+
+    monkeypatch.setattr(gsm_utils.os.path, "getsize", fake_getsize)
+    monkeypatch.setattr(gsm_utils.time, "sleep", lambda _seconds: None)
+
+    assert gsm_utils.wait_for_stable_file(str(target), timeout=1, check_interval=0.05, stable_for=0.1)
+    assert size_checks == [100, 100, 200, 200, 200]
+
+
 def test_isascii():
     assert gsm_utils.isascii("abc123")
     assert not gsm_utils.isascii("日本語")

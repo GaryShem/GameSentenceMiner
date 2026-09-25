@@ -29,6 +29,39 @@ def _screenshot_config(**overrides):
     return SimpleNamespace(screenshot=screenshot)
 
 
+def test_get_video_duration_falls_back_when_format_has_no_duration(monkeypatch):
+    monkeypatch.setattr(
+        ffmpeg.FFmpegHelper,
+        "get_probe_json",
+        lambda *_args, **_kwargs: {"format": {}},
+    )
+    monkeypatch.setattr(
+        ffmpeg.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, stdout="42.5\n", stderr=""),
+    )
+
+    assert ffmpeg.get_video_duration("replay.mkv") == 42.5
+
+
+def test_get_video_duration_uses_stream_tag_when_container_duration_is_missing(monkeypatch):
+    monkeypatch.setattr(
+        ffmpeg.FFmpegHelper,
+        "get_probe_json",
+        lambda *_args, **_kwargs: {
+            "format": {},
+            "streams": [{"tags": {"DURATION": "00:01:02.500000000"}}],
+        },
+    )
+
+    def unexpected_run(*_args, **_kwargs):
+        raise AssertionError("plain ffprobe fallback should not be needed")
+
+    monkeypatch.setattr(ffmpeg.subprocess, "run", unexpected_run)
+
+    assert ffmpeg.get_video_duration("replay.mkv") == 62.5
+
+
 def test_video_to_anim_uses_configured_av1_encoder(monkeypatch, tmp_path):
     source = tmp_path / "source.mp4"
     source.write_bytes(b"video")

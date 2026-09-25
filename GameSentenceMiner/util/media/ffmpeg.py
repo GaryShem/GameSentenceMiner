@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 import shutil
@@ -1314,14 +1315,56 @@ def get_audio_and_trim(video_path, game_line, next_line_time, anki_card_creation
     return untrimmed_audio, trimmed_audio, start_time, end_time
 
 
+def _parse_media_duration(value) -> float | None:
+    if value in (None, "", "N/A"):
+        return None
+
+    try:
+        if isinstance(value, str) and ":" in value:
+            hours, minutes, seconds = value.split(":", 2)
+            duration = float(hours) * 3600 + float(minutes) * 60 + float(seconds)
+        else:
+            duration = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    if not math.isfinite(duration) or duration <= 0:
+        return None
+    return duration
+
+
+def _duration_from_probe_info(info) -> float | None:
+    if not isinstance(info, dict):
+        return None
+
+    format_info = info.get("format")
+    if isinstance(format_info, dict):
+        duration = _parse_media_duration(format_info.get("duration"))
+        if duration is not None:
+            return duration
+
+    durations = []
+    for stream in info.get("streams") or []:
+        if not isinstance(stream, dict):
+            continue
+        duration = _parse_media_duration(stream.get("duration"))
+        tags = stream.get("tags")
+        if duration is None and isinstance(tags, dict):
+            duration = _parse_media_duration(tags.get("DURATION") or tags.get("duration"))
+        if duration is not None:
+            durations.append(duration)
+    return max(durations, default=None)
+
+
 def get_video_duration(file_path):
-    info = FFmpegHelper.get_probe_json(file_path, "format=duration", "")
-    # Original used specific ffprobe command that outputted plain text, not JSON
-    # get_probe_json might not work if "default=noprint..." is used with "-of json" which overrides?
-    # Let's fallback to original command style for this specific one if strictness required.
-    # Actually, let's just use JSON format which is cleaner.
-    if info and "format" in info:
-        return float(info["format"]["duration"])
+    info = FFmpegHelper.get_probe_json(
+        file_path,
+        "format=duration:stream=duration:stream_tags=DURATION",
+        "",
+    )
+    duration = _duration_from_probe_info(info)
+    if duration is not None:
+        return duration
 
     # Fallback to plain run if JSON fails or returns nothing (e.g. for some audio files)
     try:
@@ -1338,8 +1381,9 @@ def get_video_duration(file_path):
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
-        return float(result.stdout.strip())
+        return _parse_media_duration(result.stdout.strip()) or 0.0
     except Exception:
         return 0.0
 
@@ -1676,33 +1720,7 @@ def is_video_big_enough(file_path, min_size_kb=250):
 
 
 def get_audio_length(path):
-    info = FFmpegHelper.get_probe_json(path, "format=duration", "")
-    # Original used specific ffprobe command that outputted plain text, not JSON
-    # get_probe_json might not work if "default=noprint..." is used with "-of json" which overrides?
-    # Let's fallback to original command style for this specific one if strictness required.
-    # Actually, let's just use JSON format which is cleaner.
-    if info and "format" in info:
-        return float(info["format"]["duration"])
-
-    # Fallback to plain run if JSON fails or returns nothing (e.g. for some audio files)
-    try:
-        result = subprocess.run(
-            [
-                get_ffprobe_path(),
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                path,
-            ],
-            capture_output=True,
-            text=True,
-        )
-        return float(result.stdout.strip())
-    except Exception:
-        return 0.0
+    return get_video_duration(path)
 
 
 def splice_audio(input_audio, output_audio, keep_ranges, fade_duration=0.05):

@@ -795,7 +795,9 @@ class ReplayFileWatcher(FileSystemEventHandler):
         )
 
     def _process_created_replay(self, path, queued_job):
-        wait_for_stable_file(path)
+        # OBS may pause briefly while flushing a replay. A single unchanged size
+        # check can expose an MKV before its duration metadata has been written.
+        wait_for_stable_file(path, stable_for=1.0)
         self._extractor.process_replay(path, queued_job=queued_job)
 
     def on_created(self, event):
