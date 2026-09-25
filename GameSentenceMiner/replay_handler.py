@@ -174,6 +174,53 @@ _TEXTHOOKER_REPLAY_JOB = object()
 _EXTERNAL_REPLAY_JOB = object()
 
 
+def _queued_anki_note_exists(queued_job) -> bool:
+    """Return whether a queued card still has a note to update in Anki.
+
+    Yomitan can abandon/delete a note after GSM has already requested an OBS
+    replay for it. OBS may also coalesce several rapid save requests into one
+    replay. Leaving such a job in the FIFO queue shifts every later replay onto
+    the wrong card, so validate the target immediately before assigning media.
+    """
+    if not isinstance(queued_job, (tuple, list)) or not queued_job:
+        return True
+
+    note_id = getattr(queued_job[0], "noteId", None)
+    if not note_id:
+        return True
+
+    try:
+        note_infos = anki.invoke("notesInfo", notes=[note_id]) or []
+    except Exception as exc:
+        # A temporary AnkiConnect failure should not throw away queued work.
+        logger.warning(f"Could not verify queued Anki note {note_id}; processing it normally: {exc}")
+        return True
+
+    return any(int(info.get("noteId") or 0) == int(note_id) for info in note_infos)
+
+
+def _discard_stale_anki_replay_job(queued_job) -> None:
+    card = queued_job[0]
+    note_id = getattr(card, "noteId", None)
+    translation_future = queued_job[7] if len(queued_job) > 7 else None
+    if translation_future is not None:
+        try:
+            translation_future.cancel()
+        except Exception:
+            pass
+
+    try:
+        word = card.get_field(get_config().anki.word_field)
+    except Exception:
+        word = ""
+    if word:
+        gsm_status.remove_word_being_processed(word)
+
+    logger.warning(
+        f"Discarding stale Anki media job for deleted note {note_id}; assigning this replay to the next queued card."
+    )
+
+
 class ReplayAudioExtractor:
     def __init__(self):
         self._replay_job_lock = threading.Lock()
@@ -188,8 +235,11 @@ class ReplayAudioExtractor:
                 or gsm_state.lines_for_media_creation
             ):
                 return _TEXTHOOKER_REPLAY_JOB
-            if anki.card_queue:
-                return anki.card_queue.pop(0)
+            while anki.card_queue:
+                queued_job = anki.card_queue.pop(0)
+                if _queued_anki_note_exists(queued_job):
+                    return queued_job
+                _discard_stale_anki_replay_job(queued_job)
             return _EXTERNAL_REPLAY_JOB
 
     @staticmethod

@@ -26,6 +26,27 @@ def test_request_dialogue_replay_refresh_queues_job_before_saving(monkeypatch):
     assert save_calls == [True]
 
 
+def test_claim_replay_job_skips_queued_card_whose_note_was_deleted(monkeypatch):
+    stale_translation = Future()
+    stale_card = SimpleNamespace(noteId=101, get_field=lambda _field: "stale word")
+    live_card = SimpleNamespace(noteId=202, get_field=lambda _field: "live word")
+    stale_job = (stale_card, datetime.now(), [], SimpleNamespace(id="stale-line"), None, None, None, stale_translation)
+    live_job = (live_card, datetime.now(), [], SimpleNamespace(id="live-line"), None, None, None, None)
+    jobs = [stale_job, live_job]
+    monkeypatch.setattr(replay_handler.anki, "card_queue", jobs)
+    monkeypatch.setattr(
+        replay_handler.anki,
+        "invoke",
+        lambda action, **kwargs: [] if kwargs["notes"] == [101] else [{"noteId": 202}],
+    )
+
+    claimed = replay_handler.ReplayAudioExtractor().claim_replay_job()
+
+    assert claimed is live_job
+    assert jobs == []
+    assert stale_translation.cancelled()
+
+
 def test_process_replay_routes_followup_audio_to_existing_dialog_future(monkeypatch, tmp_path):
     capture_time = datetime.now()
     first_line = SimpleNamespace(id="line-1", text="one", time=capture_time - timedelta(seconds=2))
