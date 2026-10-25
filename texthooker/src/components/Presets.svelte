@@ -14,6 +14,7 @@
 		characterMilestone$,
 		continuousReconnect$,
 		customCSS$,
+		customCSSUrl$,
 		defaultSettings,
 		displayVertical$,
 		enableAfkBlur$,
@@ -54,6 +55,7 @@
 		showTimer$,
 		trimAudioWithVAD$,
 		showTrimVideoButton$,
+		showSaveClipButton$,
 		trimVideoWithVAD$,
 		showTrimmedVideoInExplorer$,
 		skipResetConfirmations$,
@@ -123,6 +125,7 @@
 			continuousReconnect$: $continuousReconnect$,
 			showConnectionErrors$: $showConnectionErrors$,
 			customCSS$: $customCSS$,
+			customCSSUrl$: $customCSSUrl$,
 			autoTranslateLines$: $autoTranslateLines$,
 			blurAutoTranslatedLines$: $blurAutoTranslatedLines$,
 			unblurTLTimer$: $unblurTLTimer$,
@@ -132,6 +135,7 @@
 			showGSMCheckboxes$: $showGSMCheckboxes$,
 			trimAudioWithVAD$: $trimAudioWithVAD$,
 			showTrimVideoButton$: $showTrimVideoButton$,
+			showSaveClipButton$: $showSaveClipButton$,
 			trimVideoWithVAD$: $trimVideoWithVAD$,
 			showTrimmedVideoInExplorer$: $showTrimmedVideoInExplorer$,
 		};
@@ -198,6 +202,7 @@
 		continuousReconnect$.next(preset.settings.continuousReconnect$ ?? defaultSettings.continuousReconnect$);
 		showConnectionErrors$.next(preset.settings.showConnectionErrors$ ?? defaultSettings.showConnectionErrors$);
 		customCSS$.next(preset.settings.customCSS$ ?? defaultSettings.customCSS$);
+		customCSSUrl$.next(preset.settings.customCSSUrl$ ?? defaultSettings.customCSSUrl$);
 		autoTranslateLines$.next(preset.settings.autoTranslateLines$ ?? defaultSettings.autoTranslateLines$);
 		blurAutoTranslatedLines$.next(
 			preset.settings.blurAutoTranslatedLines$ ?? defaultSettings.blurAutoTranslatedLines$,
@@ -209,6 +214,7 @@
 		showGSMCheckboxes$.next(preset.settings.showGSMCheckboxes$ ?? defaultSettings.showGSMCheckboxes$);
 		trimAudioWithVAD$.next(preset.settings.trimAudioWithVAD$ ?? defaultSettings.trimAudioWithVAD$);
 		showTrimVideoButton$.next(preset.settings.showTrimVideoButton$ ?? defaultSettings.showTrimVideoButton$);
+		showSaveClipButton$.next(preset.settings.showSaveClipButton$ ?? defaultSettings.showSaveClipButton$);
 		trimVideoWithVAD$.next(preset.settings.trimVideoWithVAD$ ?? defaultSettings.trimVideoWithVAD$);
 		showTrimmedVideoInExplorer$.next(
 			preset.settings.showTrimmedVideoInExplorer$ ?? defaultSettings.showTrimmedVideoInExplorer$,

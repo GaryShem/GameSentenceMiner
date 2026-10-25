@@ -1,4 +1,5 @@
 import Store from "electron-store";
+import type { GameBackgroundOptions } from '../shared/game_background.js';
 import { SteamGame } from "./ui/steam.js";
 import {ObsScene} from "./ui/obs.js";
 import { BrowserWindow } from "electron";
@@ -58,6 +59,7 @@ interface OCRConfig {
     optimize_second_scan: boolean;
     text_appears_instantly?: boolean;
     advanced_debug_logging?: boolean;
+    useOnlineOcr?: boolean;
     ocr1: string;
     ocr2: string;
     scanRate: number;
@@ -74,6 +76,8 @@ interface OCRConfig {
     menuOcrGamepad?: string;
     areaSelectOcrHotkey: string;
     areaSelectOcrGamepad: string;
+    addAreaOcrHotkey: string;
+    addAreaOcrGamepad: string;
     wholeWindowOcrHotkey: string;
     wholeWindowOcrGamepad: string;
     globalPauseHotkey: string;
@@ -161,6 +165,7 @@ interface FrontPageState {
 }
 
 interface StoreConfig {
+    gameBackgroundProfiles: Record<string, GameBackgroundOptions>;
     frontPageState: FrontPageState;
     yuzu: YuzuConfig;
     agentScriptsPath: string;
@@ -174,12 +179,14 @@ interface StoreConfig {
     startConsoleMinimized: boolean;
     autoUpdateElectron: boolean;
     autoUpdateGSMApp: boolean;
+    autoUpdateTexthook: boolean;
     customPythonPackage: string;
     pythonExtras: string[];
     windowTransparencyToolHotkey: string;
     windowTransparencyTarget: string; // Target window for transparency tool
     runWindowTransparencyToolOnStartup: boolean; // Whether to run the transparency tool on startup
     runOverlayOnStartup: boolean; // Whether to run the overlay on startup
+    runOverlayWithActiveGame: boolean;
     quitOnWindowClose: boolean; // Whether the main window X button quits instead of hiding to tray
     textCaptureWizardEnabled: boolean; // Whether to show the text capture wizard after capture setup
     obsOcrScenes: string[];
@@ -215,6 +222,7 @@ interface StoreConfig {
 
 export const store = new Store<StoreConfig>({
     defaults: {
+        gameBackgroundProfiles: {},
         frontPageState: {
             agentEnabled: false,
             ocrEnabled: false,
@@ -237,6 +245,7 @@ export const store = new Store<StoreConfig>({
         startConsoleMinimized: false,
         autoUpdateElectron: false,
         autoUpdateGSMApp: false,
+        autoUpdateTexthook: true,
         VN: {
             vns: [],
             textractorPath: "",
@@ -262,8 +271,9 @@ export const store = new Store<StoreConfig>({
             optimize_second_scan: true,
             text_appears_instantly: false,
             advanced_debug_logging: false,
+            useOnlineOcr: false,
             ocr1: DEFAULT_STABILITY_OCR,
-            ocr2: "glens",
+            ocr2: DEFAULT_STABILITY_OCR,
             language: "ja",
             ocr_screenshots: false,
             furigana_filter_sensitivity: 0,
@@ -274,6 +284,8 @@ export const store = new Store<StoreConfig>({
             manualOcrDelayGamepadOnly: false,
             areaSelectOcrHotkey: "Ctrl+Shift+O",
             areaSelectOcrGamepad: "",
+            addAreaOcrHotkey: "Alt+Shift+N",
+            addAreaOcrGamepad: "",
             wholeWindowOcrHotkey: "Ctrl+Shift+W",
             wholeWindowOcrGamepad: "",
             globalPauseHotkey: "Ctrl+Shift+P",
@@ -321,7 +333,8 @@ export const store = new Store<StoreConfig>({
         windowTransparencyToolHotkey: 'Ctrl+Alt+Y',
         windowTransparencyTarget: '', // Default to empty string if not set
         runWindowTransparencyToolOnStartup: false, // Whether to run the transparency tool on startup
-        runOverlayOnStartup: false, // Whether to run the overlay on startup    
+        runOverlayOnStartup: false, // Whether to run the overlay on startup
+        runOverlayWithActiveGame: false,
         quitOnWindowClose: false,
         textCaptureWizardEnabled: true,
         obsOcrScenes: [],
@@ -703,6 +716,14 @@ export function getAutoUpdateGSMApp(): boolean {
     return store.get("autoUpdateGSMApp");
 }
 
+export function getAutoUpdateTexthook(): boolean {
+    return store.get("autoUpdateTexthook", true);
+}
+
+export function setAutoUpdateTexthook(enabled: boolean): void {
+    store.set("autoUpdateTexthook", enabled);
+}
+
 export function setAutoUpdateGSMApp(autoUpdate: boolean): void {
     store.set("autoUpdateGSMApp", autoUpdate);
 }
@@ -856,11 +877,21 @@ export function setRunWindowTransparencyToolOnStartup(run: boolean): void {
 }
 
 export function getRunOverlayOnStartup(): boolean {
-    return store.get("runOverlayOnStartup");
+    return store.get("runOverlayOnStartup") && !getRunOverlayWithActiveGame();
 }
 
 export function setRunOverlayOnStartup(run: boolean): void {
+    if (run) store.set("runOverlayWithActiveGame", false);
     store.set("runOverlayOnStartup", run);
+}
+
+export function getRunOverlayWithActiveGame(): boolean {
+    return store.get("runOverlayWithActiveGame", false);
+}
+
+export function setRunOverlayWithActiveGame(run: boolean): void {
+    if (run) store.set("runOverlayOnStartup", false);
+    store.set("runOverlayWithActiveGame", run);
 }
 
 export function getQuitOnWindowClose(): boolean {
@@ -1080,7 +1111,14 @@ export function getTheme(): string {
 }
 
 export function setTheme(theme: string): void {
-    store.set("theme", theme || "gsm-dark");
+    const nextTheme = theme || "gsm-dark";
+    if (getTheme() === nextTheme) return;
+    store.set("theme", nextTheme);
+    for (const window of BrowserWindow.getAllWindows()) {
+        if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+            window.webContents.send('settings.themeChanged', nextTheme);
+        }
+    }
 }
 
 export function getHasCompletedSetup(): boolean {
@@ -1126,6 +1164,11 @@ export function setKeepNewline(keep: boolean): void {
 
 export function getOCRConfig(): OCRConfig {
     let config = store.get("OCR");
+    config = {
+        ...config,
+        addAreaOcrHotkey: config.addAreaOcrHotkey ?? "Alt+Shift+N",
+        addAreaOcrGamepad: config.addAreaOcrGamepad ?? "",
+    };
     if (config.menuOcrHotkey === undefined) {
         config = {
             ...config,
@@ -1344,14 +1387,6 @@ export function getStartConsoleMinimized(): boolean {
 
 export function setStartConsoleMinimized(shouldMinimize: boolean): void {
     store.set("startConsoleMinimized", shouldMinimize);
-}
-
-export function setShowYuzuTab(shouldShow: boolean): void {
-    store.set("showYuzuTab", shouldShow);
-}
-
-export function getShowYuzuTab(): boolean {
-    return store.get("showYuzuTab");
 }
 
 export function getVNs(): VN[] {

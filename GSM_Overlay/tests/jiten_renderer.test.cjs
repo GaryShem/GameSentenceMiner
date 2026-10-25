@@ -145,6 +145,7 @@ test('furigana script filter includes kana and extended kanji, excludes wide Lat
 
 function loadGamepad(invoke) {
   const context = vm.createContext({ module: { exports: {} }, window: { ipcRenderer: { invoke } }, console });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../dictionary_navigation.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../gamepad.js'), 'utf8'), context);
   const handler = Object.create(context.module.exports.prototype);
   handler.config = { tokenizerBackend: 'jiten-api', jitenApiKey: 'test' };
@@ -225,7 +226,7 @@ test('OCR highlighting reserves Jiten parsing for the authoritative final payloa
     console,
     window: {
       GsmJitenHighlight: {
-        requestParse: (lines) => { calls.push(lines); return Promise.resolve(); },
+        requestParse: (lines, lineBlocks) => { calls.push({ lines, lineBlocks }); return Promise.resolve(); },
         reposition() {},
       },
     },
@@ -234,8 +235,10 @@ test('OCR highlighting reserves Jiten parsing for the authoritative final payloa
 
   context.applyHighlight([{ text: '途中' }], { lineId: 'line-1', isFinal: false });
   assert.equal(calls.length, 0);
-  context.applyHighlight([{ text: '確定' }], { lineId: 'line-1', isFinal: true });
+  const lineBlocks = new Map([[0, 0], [1, 0]]);
+  context.applyHighlight([{ text: '確定' }, { text: 'しました' }], { lineId: 'line-1', isFinal: true }, lineBlocks);
   assert.equal(calls.length, 1);
+  assert.equal(calls[0].lineBlocks, lineBlocks);
   context.applyHighlight([{ text: '単発' }], { lineId: null, isFinal: false });
   assert.equal(calls.length, 2);
 });
@@ -247,11 +250,13 @@ test('Jiten availability recovery preserves authoritative OCR metadata', () => {
   const calls = [];
   const context = vm.createContext({
     jitenHighlightAvailable: false,
+    localVocabularyEnabled: false,
     jitenReaderEnabled: true,
     jitenHighlightingEnabled: true,
     lastJitenHighlightLines: [{ text: '途中' }],
     lastJitenHighlightMeta: { lineId: 'line-1', isFinal: false },
-    applyJitenHighlightingForLines: (lines, meta) => calls.push({ lines, meta }),
+    lastJitenHighlightLineBlocks: new Map([[0, 0]]),
+    applyJitenHighlightingForLines: (lines, meta, lineBlocks) => calls.push({ lines, meta, lineBlocks }),
     console,
     window: {
       GsmJitenHighlight: {
@@ -267,13 +272,32 @@ test('Jiten availability recovery preserves authoritative OCR metadata', () => {
   assert.deepEqual(calls, [{
     lines: context.lastJitenHighlightLines,
     meta: context.lastJitenHighlightMeta,
+    lineBlocks: context.lastJitenHighlightLineBlocks,
   }]);
 });
 
 test('all overlay inline scripts remain syntactically valid', () => {
-  const html = fs.readFileSync(path.join(__dirname, '../index.html'), 'utf8');
-  for (const match of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
-    if (/\bsrc\s*=|type\s*=\s*["'](?:module|application\/json)/i.test(match[1])) continue;
-    new vm.Script(match[2]);
+  const settings = require('./helpers/settings-source.cjs').readSettingsSource();
+  assert.ok(settings.scripts.length && settings.styles.length, 'Settings assets must load from the HTML shell');
+  new vm.Script(settings.scripts);
+  for (const file of ['index.html', 'settings.html']) {
+    const html = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    for (const match of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)) {
+      if (/\bsrc\s*=|type\s*=\s*["'](?:module|application\/json)/i.test(match[1])) continue;
+      new vm.Script(match[2]);
+    }
   }
+});
+
+test('local highlighting remains available without the Reader or API key', () => {
+  const html = fs.readFileSync(path.join(__dirname, '../index.html'), 'utf8');
+  const start = html.indexOf('function applyVerifiedJitenAvailability');
+  const end = html.indexOf('function jitenSettingTruthy', start);
+  const calls = [];
+  const context = vm.createContext({ localVocabularyEnabled: true, jitenHighlightAvailable: false,
+    jitenReaderEnabled: false, jitenHighlightingEnabled: true,
+    window: { GsmJitenHighlight: { setAvailable: value => calls.push(value) } } });
+  vm.runInContext(`${html.slice(start, end)}\nglobalThis.applyAvailability = applyVerifiedJitenAvailability;`, context);
+  context.applyAvailability(false, true);
+  assert.deepEqual(calls, [], 'Reader availability must not disable the independent local parser');
 });

@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ProcessManager, ProcessState } from './process_manager.js';
 import type { BrokerStartInfo } from './message_bus.js';
@@ -85,6 +85,20 @@ const ALIVE_SCRIPT = 'setInterval(() => {}, 1000);';
 const CRASH_SCRIPT = 'process.exit(3);';
 
 describe('ProcessManager', () => {
+    it('preserves UTF-8 characters split across child pipe writes', async () => {
+        const chunks: string[] = [];
+        pm.on('log', (_id, log) => chunks.push(log.message));
+        pm.register({
+            id: 'unicode', readyOn: 'spawn', windowsHide: true,
+            buildCommand: () => ({ command: process.execPath, args: ['-e',
+                "const bytes = Buffer.from('日本語'); process.stderr.write(bytes.subarray(0, 1)); setTimeout(() => process.stderr.write(bytes.subarray(1)), 50); setInterval(() => {}, 1000);"
+            ] }),
+        });
+        pm.start('unicode');
+        await vi.waitFor(() => expect(chunks.join('')).toBe('日本語'));
+        await pm.stop('unicode');
+    });
+
     it('spawns and reports ready once the bus reports the client connected', async () => {
         pm.register({
             id: 'alive',
@@ -159,6 +173,92 @@ describe('ProcessManager', () => {
             data: gracefulStopData,
         });
     });
+
+    it.skipIf(process.platform !== 'win32')('stops an actual Windows child with an empty PATH', async () => {
+        pm.register({
+            id: 'alive',
+            buildCommand: () => ({ command: process.execPath, args: ['-e', ALIVE_SCRIPT] }),
+        });
+        pm.start('alive');
+
+        try {
+            vi.stubEnv('PATH', '');
+            await pm.stop('alive');
+            expect(pm.isRunning('alive')).toBe(false);
+            expect(pm.getState('alive')).toBe('stopped');
+        } finally {
+            // Restore lookup before afterEach cleans up if the regression fails.
+            vi.unstubAllEnvs();
+        }
+    });
+
+    it('coalesces overlapping stop requests while the child is still shutting down', async () => {
+        pm.register({
+            id: 'alive',
+            buildCommand: () => ({ command: process.execPath, args: ['-e', ALIVE_SCRIPT] }),
+            gracefulStop: { topic: 'alive.stop', timeoutMs: 150 },
+        });
+        pm.start('alive');
+        bus.connect('alive');
+
+        await Promise.all([pm.stop('alive'), pm.stopAll()]);
+        expect(bus.published.filter((item) => item.topic === 'alive.stop')).toHaveLength(1);
+        expect(pm.getState('alive')).toBe('stopped');
+    });
+
+    it.skipIf(process.platform !== 'linux').each(['signal', 'bus'])(
+        'stops a worker that ignores SIGTERM after its parent exits via %s', async (mode) => {
+            const workerScript = `
+                process.on('SIGTERM', () => {});
+                console.log(JSON.stringify({ workerPid: process.pid }));
+                setInterval(() => {}, 1000);
+            `;
+            const parentScript = `
+                const { spawn } = require('node:child_process');
+                process.on('SIGTERM', () => process.exit(0));
+                spawn(process.execPath, ['-e', ${JSON.stringify(workerScript)}], { stdio: 'inherit' });
+                setInterval(() => {}, 1000);
+            `;
+            let workerPid: number | undefined;
+            pm.on('log', (_id, log) => {
+                if (log.stream === 'stdout') {
+                    workerPid = JSON.parse(log.message).workerPid;
+                }
+            });
+            pm.register({
+                id: 'tree',
+                buildCommand: () => ({ command: process.execPath, args: ['-e', parentScript] }),
+                gracefulStop: { topic: 'tree.stop', timeoutMs: 150 },
+            });
+            pm.start('tree');
+            const parentPid = pm.getPid('tree')!;
+            try {
+                await vi.waitFor(() => expect(workerPid).toBeTypeOf('number'));
+                if (mode === 'bus') {
+                    bus.connect('tree');
+                    vi.spyOn(bus, 'publish').mockImplementation(() => {
+                        process.kill(parentPid, 'SIGTERM');
+                    });
+                }
+                const stopped = pm.stop('tree');
+                await waitForState('tree', 'stopped');
+                await stopped;
+                await vi.waitFor(() => {
+                    // An exited orphan can briefly remain a zombie until init reaps it.
+                    const stat = workerPid && fs.existsSync(`/proc/${workerPid}/stat`)
+                        ? fs.readFileSync(`/proc/${workerPid}/stat`, 'utf8') : '';
+                    expect(stat === '' || stat.slice(stat.lastIndexOf(')') + 2).startsWith('Z')).toBe(true);
+                });
+            } finally {
+                // Keep the regression safe to run against the broken implementation too.
+                for (const pid of [workerPid, parentPid]) {
+                    if (pid) {
+                        try { process.kill(pid, 'SIGKILL'); } catch { /* already exited */ }
+                    }
+                }
+            }
+        }, 10_000
+    );
 
     it('marks a process crashed and auto-restarts with backoff', async () => {
         let spawnCount = 0;

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from loguru import logger as loguru_logger
 
 from GameSentenceMiner.ai.contracts import AIError, AIResponse
 from GameSentenceMiner.ai.service import AIService, snapshot_config
@@ -114,7 +115,7 @@ def _build_ai_config(provider: str, primary_model: str, backup_model: str) -> Ai
 @pytest.mark.parametrize(
     ("provider", "primary_model", "backup_model"),
     [
-        (AI_GEMINI, "gemini-2.5-flash", "gemma-3-27b-it"),
+        (AI_GEMINI, "gemini-3.5-flash-lite", "gemma-4-31b-it"),
         (AI_GROQ, "llama-3.1-8b-instant", "qwen/qwen3-32b"),
         (AI_OPENAI, "gpt-4o-mini", "gpt-4.1-mini"),
         (AI_OLLAMA, "llama3", "qwen2.5"),
@@ -139,7 +140,7 @@ def test_execute_request_retries_with_backup_model_on_primary_failure(
 @pytest.mark.parametrize(
     ("provider", "primary_model", "backup_model"),
     [
-        (AI_GEMINI, "gemini-2.5-flash", "gemma-3-27b-it"),
+        (AI_GEMINI, "gemini-3.5-flash-lite", "gemma-4-31b-it"),
         (AI_GROQ, "llama-3.1-8b-instant", "qwen/qwen3-32b"),
         (AI_OPENAI, "gpt-4o-mini", "gpt-4.1-mini"),
         (AI_OLLAMA, "llama3", "qwen2.5"),
@@ -158,3 +159,39 @@ def test_execute_request_raises_primary_error_when_backup_also_fails(
         service._execute_request(request)
 
     assert client.models_seen == [primary_model, backup_model]
+
+
+@pytest.mark.parametrize("saved", [{}, {"gemini_model": "gemini-2.5-flash", "gemini_backup_model": "gemini-2.0-flash"}])
+def test_gemini_defaults_and_migrated_models_retry_with_gemma_4(saved):
+    cfg = Ai.from_dict({"gemini_api_key": "test-key", **saved})
+    client = _FailoverClient("gemini-3.5-flash-lite", "gemma-4-31b-it")
+    service = _build_service(cfg, client)
+
+    response = service._execute_request(service._make_request(prompt="hello", request_kind="raw"))
+
+    assert response.text == "ok"
+    assert client.models_seen == ["gemini-3.5-flash-lite", "gemma-4-31b-it"]
+
+
+def test_failed_fallback_logs_model_names_and_error_with_production_logger():
+    primary_model, backup_model = "gemini-3.5-flash-lite", "gemma-4-31b-it"
+    service = _build_service(
+        _build_ai_config(AI_GEMINI, primary_model, backup_model),
+        _AlwaysFailClient(primary_model, backup_model),
+    )
+    service.logger = loguru_logger.bind(fallback_logging_test=True)
+    messages = []
+    handler = loguru_logger.add(
+        lambda message: messages.append(message.record["message"]),
+        filter=lambda record: record["extra"].get("fallback_logging_test", False),
+    )
+    try:
+        with pytest.raises(AIError, match="Primary failed"):
+            service._execute_request(service._make_request(prompt="hello", request_kind="raw"))
+    finally:
+        loguru_logger.remove(handler)
+
+    assert messages == [
+        f"Primary AI model failed ({primary_model}). Retrying with backup model '{backup_model}'.",
+        f"Backup AI model '{backup_model}' also failed after primary model '{primary_model}': Backup failed",
+    ]

@@ -36,6 +36,8 @@ function loadLegacyGamepadHandler() {
     }
   };
 
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.resolve(process.cwd(), 'GSM_Overlay/dictionary_navigation.js'), 'utf8'), context);
   vm.runInNewContext(source, context, {
     filename: "GSM_Overlay/gamepad.js"
   });
@@ -63,10 +65,11 @@ function loadStartupGamepadSettings(settings: Record<string, unknown>) {
       `const newsettings = ${JSON.stringify(settings)};`,
       "const gamepadSettings = { enabled: true };",
       "const KEYBOARD_SETTING_KEYS = [];",
+      source.slice(source.indexOf("  const GAMEPAD_NAVIGATION_OPTIONS = ["), source.indexOf("  let gamepadSettings = {")),
       source.slice(start, end),
       "module.exports = gamepadSettings;"
     ].join("\n"),
-    { module },
+    { module, window: {} },
     { filename: "GSM_Overlay/index.html#startup-gamepad-settings" }
   );
 
@@ -78,6 +81,48 @@ const GamepadHandler = legacyGamepad.GamepadHandler;
 const legacyGamepadContext = legacyGamepad.context;
 
 describe("legacy gamepad startup settings", () => {
+  it("restores remapped quick actions, including generic chords and disabled bindings", () => {
+    expect(loadStartupGamepadSettings({ gamepadQuickActionsButton: 'Button 803 + Button 809' })).toMatchObject({
+      quickActionsButton: 'Button 803 + Button 809',
+    });
+    expect(loadStartupGamepadSettings({ gamepadQuickActionsButton: 'Disabled' })).toMatchObject({
+      quickActionsButton: 'Disabled',
+    });
+  });
+  it.each(["RB + X", "Disabled", -1, 0])("restores the translation binding %s", (binding) => {
+    expect(loadStartupGamepadSettings({ gamepadTranslateButton: binding })).toMatchObject({
+      translateButton: binding,
+    });
+  });
+
+  it("restores generic controller navigation bindings and disabled directions", () => {
+    expect(loadStartupGamepadSettings({
+      gamepadNavigateUp: "Button 803", gamepadNavigateDown: "Button 806 + Button 809",
+      gamepadNavigateLeft: "Disabled", gamepadNavigateRight: 196642,
+    })).toMatchObject({
+      dpadUp: "Button 803", dpadDown: "Button 806 + Button 809",
+      dpadLeft: "Disabled", dpadRight: 196642,
+    });
+  });
+  it("restores dedicated Jiten word bindings, including explicit disabled values", () => {
+    expect(loadStartupGamepadSettings({
+      gamepadPrevJitenWordButton: "LB", gamepadNextJitenWordButton: "RB"
+    })).toMatchObject({ prevJitenWordButton: "LB", nextJitenWordButton: "RB" });
+    expect(loadStartupGamepadSettings({
+      gamepadPrevJitenWordButton: "Disabled", gamepadNextJitenWordButton: -1
+    })).toMatchObject({ prevJitenWordButton: "Disabled", nextJitenWordButton: -1 });
+  });
+
+  it("loads saved navigation experiments before initialization", () => {
+    expect(loadStartupGamepadSettings({
+      gamepadHoldNavigation: "sentence", gamepadHorizontalWrap: "line",
+      gamepadVerticalNavigation: "spatial", gamepadInitialPosition: "nearest",
+      gamepadBlockJumpAnimation: true, gamepadAnalogAcceleration: true
+    })).toMatchObject({
+      holdNavigation: "sentence", horizontalWrap: "line", verticalNavigation: "spatial",
+      initialPosition: "nearest", blockJumpAnimation: true, analogAcceleration: true
+    });
+  });
   it("honors a disabled master gamepad setting before initialization", () => {
     expect(loadStartupGamepadSettings({ gamepadEnabled: false })).toMatchObject({
       enabled: false
@@ -85,9 +130,63 @@ describe("legacy gamepad startup settings", () => {
   });
 });
 
+describe("gamepad translation binding", () => {
+  function setup(config: Record<string, unknown> = {}) {
+    const handler = Object.create(GamepadHandler.prototype) as any;
+    handler.config = { activationMode: "toggle", controllerEnabled: true, translateButton: "RB + X", ...config };
+    handler.buttonStates = new Map();
+    handler.gamepads = new Map();
+    handler.repeatTimers = new Map();
+    handler.isNavigationActive = () => false;
+    handler.shouldProcessNavigation = () => false;
+    handler.getToggleTimestamp = vi.fn(() => 1000);
+    const send = vi.fn();
+    handler.getIpcRenderer = () => ({ send });
+    handler.refreshButtonBindings();
+    const button = (index: number, pressed = true, device = "pad") =>
+      handler.onButtonEvent({ device, button: index, pressed });
+    return { handler, send, button };
+  }
+
+  it.each(["modifier", "toggle"])("requests translation outside %s navigation with a full combo only", (activationMode) => {
+    const { button, send } = setup({ activationMode });
+    button(5);
+    expect(send).not.toHaveBeenCalled();
+    button(2, true, "other-pad");
+    expect(send).not.toHaveBeenCalled();
+    button(2);
+    expect(send).toHaveBeenCalledExactlyOnceWith("gamepad-translate");
+    button(2, false);
+    button(5, false);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts a single button and debounces duplicate controller events", () => {
+    const { handler, button, send } = setup({ translateButton: 2 });
+    button(2);
+    button(2);
+    expect(send).toHaveBeenCalledExactlyOnceWith("gamepad-translate");
+    button(2, false);
+    handler.getToggleTimestamp.mockReturnValue(1300);
+    button(2);
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { translateButton: undefined }, { translateButton: -1 }, { translateButton: "Disabled" },
+    { controllerEnabled: false }, { inputSuppressed: true },
+  ])("ignores translation when disabled or capturing input: %j", (config) => {
+    const { button, send } = setup(config);
+    button(5);
+    button(2);
+    expect(send).not.toHaveBeenCalled();
+  });
+});
+
 describe("legacy gamepad toggle debouncing", () => {
   it("ignores a second navigation toggle during a Steam input-mode handoff", () => {
     const handler = Object.create(GamepadHandler.prototype) as {
+      config: Record<string, unknown>;
       toggleModeActive: boolean;
       lastToggleActionTimes: Map<string, number>;
       activateNavigation: ReturnType<typeof vi.fn>;
@@ -95,6 +194,7 @@ describe("legacy gamepad toggle debouncing", () => {
       getToggleTimestamp: ReturnType<typeof vi.fn>;
       toggleNavigationMode: () => boolean;
     };
+    handler.config = {};
     handler.toggleModeActive = false;
     handler.lastToggleActionTimes = new Map();
     handler.activateNavigation = vi.fn();
@@ -120,7 +220,7 @@ describe("legacy gamepad toggle debouncing", () => {
 });
 
 describe("legacy gamepad Sudachi requests", () => {
-  it("includes the configured dictionary in tokenization requests", () => {
+  it("includes the configured dictionary in tokenization requests", async () => {
     const sent: unknown[] = [];
     const handler = Object.create(GamepadHandler.prototype) as {
       config: { sudachiDictionary: string };
@@ -128,14 +228,17 @@ describe("legacy gamepad Sudachi requests", () => {
       ws: { send: (payload: string) => void };
       sudachiAvailable: boolean;
       mecabAvailable: boolean;
+      pendingTokenizationRequests: Map<number, any>;
     };
     handler.config = { sudachiDictionary: "small" };
     handler.wsConnected = true;
     handler.ws = { send: (payload) => sent.push(JSON.parse(payload)) };
     handler.sudachiAvailable = true;
     handler.mecabAvailable = false;
+    const request: any = { id: 1, text: "食べた。" };
+    handler.pendingTokenizationRequests = new Map([[2, request]]);
 
-    GamepadHandler.prototype.requestTokenizationFromServer.call(
+    const result = GamepadHandler.prototype.requestTokenizationFromServer.call(
       handler,
       2,
       "食べた。",
@@ -147,10 +250,13 @@ describe("legacy gamepad Sudachi requests", () => {
         type: "tokenize",
         blockIndex: 2,
         text: "食べた。",
+        requestId: 1,
         backend: "sudachi",
         dictionary: "small"
       }
     ]);
+    request.resolveServer({ sudachiAvailable: true, tokens: [] });
+    await result;
   });
 });
 
@@ -158,6 +264,7 @@ describe("legacy gamepad token refreshes", () => {
   it("does not trigger a lookup when refreshed text finishes tokenizing", () => {
     const handler = Object.create(GamepadHandler.prototype) as any;
     handler.pendingTokenizationByBlock = new Map([[0, true]]);
+    handler.textBlocks = [{}];
     handler.tokenCacheByBlock = new Map();
     handler.currentBlockIndex = 0;
     handler.currentCursorIndex = 1;
@@ -192,6 +299,7 @@ describe("legacy gamepad token refreshes", () => {
   it("suppresses lookup when refreshed tokens resync the virtual cursor", () => {
     const handler = Object.create(GamepadHandler.prototype) as any;
     handler.pendingTokenizationByBlock = new Map([[0, true]]);
+    handler.textBlocks = [{}];
     handler.tokenCacheByBlock = new Map();
     handler.currentBlockIndex = 0;
     handler.tokens = [];
@@ -200,6 +308,7 @@ describe("legacy gamepad token refreshes", () => {
     handler.getBlockText = () => "日本語";
     handler.shouldTokenizeText = () => true;
     handler.isNavigationActive = () => true;
+    handler.getCurrentAnchorCharIndex = () => 1;
     handler.autoConfirmSelection = vi.fn();
     handler.syncSelectionFromVirtualMouse = vi.fn(
       (_sourceElement: unknown, options: { autoConfirm?: boolean } = {}) => {
@@ -228,7 +337,9 @@ describe("legacy gamepad token refreshes", () => {
 
   it("confirms the current selection when navigation enters with tokenization pending", () => {
     const handler = Object.create(GamepadHandler.prototype) as any;
+    handler.activeLookup = { targetChar: {}, text: "日本語" };
     handler.pendingTokenizationByBlock = new Map([[0, "日本語"]]);
+    handler.textBlocks = [{}];
     handler.pendingTokenizationStartedWhileNavigationActive = new Map([[0, false]]);
     handler.tokenCacheByBlock = new Map();
     handler.currentBlockIndex = 0;
@@ -298,7 +409,7 @@ describe("legacy gamepad analog lookup path", () => {
     handler.navigationAwayHideTimer = null;
 
     try {
-      GamepadHandler.prototype.scheduleHideYomitanAfterLeavingAnchor.call(handler, "0:0");
+      GamepadHandler.prototype.scheduleHideDictionaryAfterLeavingAnchor.call(handler, "0:0");
       expect(handler.navigationAwayHideTimer).toBeNull();
     } finally {
       if (handler.navigationAwayHideTimer) {
@@ -382,11 +493,11 @@ describe("legacy gamepad button bindings", () => {
       matchesButtonBindingDown: (binding: any, device: string, buttonIndex: number) => boolean;
       refreshButtonBindings: () => void;
       onButtonDown: (buttonIndex: number, device: string) => void;
-      yomitanPopupVisible: boolean;
+      dictionaryPopupVisible: boolean;
       isNavigationActive: () => boolean;
       shouldProcessNavigation: () => boolean;
-      navigateYomitanNextEntry: () => void;
-      navigateYomitanPrevEntry: () => void;
+      navigateDictionaryNextEntry: () => void;
+      navigateDictionaryPrevEntry: () => void;
     };
 
     handler.config = {
@@ -401,15 +512,15 @@ describe("legacy gamepad button bindings", () => {
     handler.matchesButtonBindingDown = GamepadHandler.prototype.matchesButtonBindingDown;
     handler.refreshButtonBindings = GamepadHandler.prototype.refreshButtonBindings;
     handler.onButtonDown = GamepadHandler.prototype.onButtonDown;
-    handler.yomitanPopupVisible = true;
+    handler.dictionaryPopupVisible = true;
     handler.isNavigationActive = () => false;
     handler.shouldProcessNavigation = () => false;
 
     const calls: string[] = [];
-    handler.navigateYomitanNextEntry = () => {
+    handler.navigateDictionaryNextEntry = () => {
       calls.push("next");
     };
-    handler.navigateYomitanPrevEntry = () => {
+    handler.navigateDictionaryPrevEntry = () => {
       calls.push("prev");
     };
 
@@ -450,7 +561,7 @@ describe("legacy gamepad button bindings", () => {
       areButtonBindingsEquivalent: (left: any, right: any) => boolean;
       refreshButtonBindings: () => void;
       onButtonDown: (buttonIndex: number, device: string) => void;
-      yomitanPopupVisible: boolean;
+      dictionaryPopupVisible: boolean;
       isNavigationActive: () => boolean;
       shouldProcessNavigation: () => boolean;
       confirmSelection: () => void;
@@ -473,7 +584,7 @@ describe("legacy gamepad button bindings", () => {
     handler.areButtonBindingsEquivalent = GamepadHandler.prototype.areButtonBindingsEquivalent;
     handler.refreshButtonBindings = GamepadHandler.prototype.refreshButtonBindings;
     handler.onButtonDown = GamepadHandler.prototype.onButtonDown;
-    handler.yomitanPopupVisible = false;
+    handler.dictionaryPopupVisible = false;
     handler.isNavigationActive = () => true;
     handler.shouldProcessNavigation = () => false;
 
@@ -527,7 +638,7 @@ describe("legacy gamepad button bindings", () => {
       areButtonBindingsEquivalent: (left: any, right: any) => boolean;
       refreshButtonBindings: () => void;
       onButtonDown: (buttonIndex: number, device: string) => void;
-      yomitanPopupVisible: boolean;
+      dictionaryPopupVisible: boolean;
       isNavigationActive: () => boolean;
       shouldProcessNavigation: () => boolean;
       confirmSelection: () => void;
@@ -549,7 +660,7 @@ describe("legacy gamepad button bindings", () => {
     handler.areButtonBindingsEquivalent = GamepadHandler.prototype.areButtonBindingsEquivalent;
     handler.refreshButtonBindings = GamepadHandler.prototype.refreshButtonBindings;
     handler.onButtonDown = GamepadHandler.prototype.onButtonDown;
-    handler.yomitanPopupVisible = false;
+    handler.dictionaryPopupVisible = false;
     handler.isNavigationActive = () => true;
     handler.shouldProcessNavigation = () => false;
 
@@ -811,8 +922,7 @@ describe("legacy gamepad block redraw recovery", () => {
     };
     const handler = Object.create(GamepadHandler.prototype) as {
       lastSelectionSnapshot: typeof snapshot | null;
-      skipNextTextRefresh: boolean;
-      preserveSelectionOnNextTextRefresh: boolean;
+      textMutationObserver: { takeRecords: () => void };
       virtualMouse: { movedByAnalog: boolean; lastMoveTime: number };
       currentBlockIndex: number;
       currentCursorIndex: number;
@@ -826,8 +936,7 @@ describe("legacy gamepad block redraw recovery", () => {
     };
 
     handler.lastSelectionSnapshot = null;
-    handler.skipNextTextRefresh = false;
-    handler.preserveSelectionOnNextTextRefresh = false;
+    handler.textMutationObserver = { takeRecords: () => calls.push("consume-render-mutations") };
     handler.virtualMouse = { movedByAnalog: true, lastMoveTime: 123 };
     handler.currentBlockIndex = 0;
     handler.currentCursorIndex = 0;
@@ -849,12 +958,10 @@ describe("legacy gamepad block redraw recovery", () => {
     });
 
     expect(handler.lastSelectionSnapshot).toBe(snapshot);
-    expect(handler.skipNextTextRefresh).toBe(true);
-    expect(handler.preserveSelectionOnNextTextRefresh).toBe(true);
     expect(handler.virtualMouse).toMatchObject({ movedByAnalog: false, lastMoveTime: 0 });
     expect(handler.currentBlockIndex).toBe(1);
     expect(handler.currentCursorIndex).toBe(3);
-    expect(calls).toEqual(["virtual", "refresh", "restore", "prefetch", "visuals"]);
+    expect(calls).toEqual(["consume-render-mutations", "virtual", "refresh", "restore", "prefetch", "visuals"]);
   });
 
   it("focuses the latest-line block instead of restoring the previous selection", () => {
@@ -870,8 +977,6 @@ describe("legacy gamepad block redraw recovery", () => {
     ];
     const handler = Object.create(GamepadHandler.prototype) as any;
     handler.lastSelectionSnapshot = previousSnapshot;
-    handler.skipNextTextRefresh = false;
-    handler.preserveSelectionOnNextTextRefresh = false;
     handler.virtualMouse = { movedByAnalog: true, lastMoveTime: 123 };
     handler.textBlocks = blocks;
     handler.currentBlockIndex = 0;
@@ -1040,10 +1145,10 @@ describe("legacy gamepad popup routing", () => {
     legacyGamepadContext.document.querySelector = () => null;
 
     const handler = Object.create(GamepadHandler.prototype) as {
-      sendYomitanControlMessage: (action: string, params?: Record<string, unknown>) => void;
+      sendDictionaryControlMessage: (action: string, params?: Record<string, unknown>) => void;
     };
 
-    handler.sendYomitanControlMessage("reset-action-selection");
+    handler.sendDictionaryControlMessage("reset-action-selection");
 
     expect(hostMessages).toEqual([
       {

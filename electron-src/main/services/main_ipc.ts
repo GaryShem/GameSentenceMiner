@@ -20,6 +20,7 @@ import { BASE_DIR } from '../util.js';
 import { isAllowedDocsUrl } from '../../shared/docs.js';
 import type { DesktopUpdateChangelogSnapshot } from '../../shared/changelog.js';
 import type { InstallSessionSnapshot } from '../../shared/install_session.js';
+import type { AppUpdateStatus } from '../../shared/app_update.js';
 import { registerWindowSceneSwitcherIPC } from './window_scene_switcher.js';
 
 interface MainIPCDependencies {
@@ -28,6 +29,9 @@ interface MainIPCDependencies {
     getUpdateStatus: () => Promise<unknown>;
     checkForUpdates: () => Promise<unknown>;
     updateNow: () => Promise<unknown>;
+    getAppUpdateStatus: () => AppUpdateStatus;
+    getAppUpdateChangelog: () => Promise<DesktopUpdateChangelogSnapshot | null>;
+    installAppUpdate: (version: string) => Promise<AppUpdateStatus>;
     showUpdateChangelogPreview: (payload: {
         fromVersion: string;
         toVersion: string;
@@ -48,8 +52,8 @@ function openDocsWindow(url: string, parentWindow: BrowserWindow | null): Browse
     const docsWindow = new BrowserWindow({
         width: 1280,
         height: 920,
-        minWidth: 900,
-        minHeight: 640,
+        minWidth: 800,
+        minHeight: 500,
         autoHideMenuBar: true,
         title: 'GameSentenceMiner Documentation',
         parent: parentWindow && !parentWindow.isDestroyed() ? parentWindow : undefined,
@@ -101,6 +105,9 @@ export function registerMainIPC(deps: MainIPCDependencies): void {
         getUpdateStatus: deps.getUpdateStatus,
         checkForUpdates: deps.checkForUpdates,
         updateNow: deps.updateNow,
+        getAppUpdateStatus: deps.getAppUpdateStatus,
+        getAppUpdateChangelog: deps.getAppUpdateChangelog,
+        installAppUpdate: deps.installAppUpdate,
         showUpdateChangelogPreview: deps.showUpdateChangelogPreview,
     });
     registerOCRUtilsIPC();

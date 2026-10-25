@@ -333,7 +333,8 @@ function Get-InternalWebSocketPort {
     }
 
     $logFiles = @(
-        Get-ChildItem -LiteralPath $Directory -Filter "gamesentenceminer*.log" -File -ErrorAction SilentlyContinue |
+        Get-ChildItem -LiteralPath $Directory -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq "backend.log" -or $_.Name -like "gamesentenceminer*.log" } |
             Sort-Object LastWriteTime -Descending
     )
     foreach ($logFile in $logFiles) {
@@ -392,7 +393,10 @@ function Collect-TextLogs {
     New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
     $files = @(
         Get-ChildItem -LiteralPath $Directory -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Extension -in @(".log", ".txt") } |
+            Where-Object {
+                $_.Name -match '\.(log|txt|jsonl)(\.\d+)?$' -and
+                $_.FullName -notmatch '[/\\]\.locks[/\\]' -and $_.Length -gt 0
+            } |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 40
     )
@@ -424,7 +428,10 @@ if (-not $NoPrompt) {
 }
 
 $defaultGsmDirectory = Join-Path $appData "GameSentenceMiner"
-$pointerPath = Join-Path $defaultGsmDirectory "data_dir.json"
+$pointerPath = Join-Path $userProfile ".config\GameSentenceMiner\data_dir.json"
+if (-not (Test-Path -LiteralPath $pointerPath)) {
+    $pointerPath = Join-Path $defaultGsmDirectory "data_dir.json"
+}
 $pointerObject = Read-JsonFile -Path $pointerPath
 $pointerDataDirectory = [string](Get-PropertyValue -Object $pointerObject -Name "dataDir")
 if ([string]::IsNullOrWhiteSpace($pointerDataDirectory)) {
@@ -445,7 +452,11 @@ catch {
 
 $overlayDataDirectory = [string][Environment]::GetEnvironmentVariable("GSM_OVERLAY_DATA_PATH", "Process")
 if ([string]::IsNullOrWhiteSpace($overlayDataDirectory)) {
-    $overlayDataDirectory = Join-Path $appData "gsm_overlay"
+    if ($activeGsmDirectory -eq $defaultGsmDirectory) {
+        $overlayDataDirectory = Join-Path $appData "gsm_overlay"
+    } else {
+        $overlayDataDirectory = Join-Path $activeGsmDirectory "gsm_overlay"
+    }
 }
 $oneOcrDirectory = Join-Path $userProfile ".config\oneocr"
 

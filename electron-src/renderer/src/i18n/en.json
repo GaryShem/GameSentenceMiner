@@ -1,5 +1,58 @@
 {
+  "gameBackground": {
+    "title": "Game background behavior (experimental)",
+    "help": "A small Windows hook for the game captured by this scene. Settings are remembered for this executable.",
+    "enabled": "Automatically apply to this game",
+    "keepRendering": "Keep rendering when unfocused",
+    "blockGamepad": "Block gamepad input when unfocused",
+    "target": "{name} (PID {pid})",
+    "noInput": "No supported controller API detected yet. XInput and DirectInput 8 gamepads are supported.",
+    "partial": "Some hooks could not be installed; support is partial.",
+    "error": "Hook error: {error}",
+    "retry": "Retry",
+    "limitations": "For offline games without anti-cheat. Close Special K before trying. Some engines may still pause; restart the game to fully remove the hook.",
+    "status": {
+      "disabled": "Off for this game.",
+      "waiting": "Waiting for the captured game.",
+      "blocked": "Another injector is active.",
+      "attaching": "Applying game behavior…",
+      "active": "Hooks active.",
+      "error": "The hook could not be applied."
+    },
+    "reason": {
+      "unsupported": "Available on Windows only.",
+      "missingBuild": "The game background helper has not been built or installed.",
+      "noCapture": "Select a game window capture in OBS.",
+      "notRunning": "The captured game is not running.",
+      "ambiguous": "Several game windows match this capture. Select a more specific capture.",
+      "specialK": "Special K is loaded. Restart the game without it before trying GSM's hooks."
+    }
+  },
   "home": {
+    "workspace": {
+      "library": "Your games",
+      "savedGames": "Saved games",
+      "searchGames": "Search games",
+      "noMatchingGames": "No matching games.",
+      "noGames": "No games added yet.",
+      "emptyGameHint": "Add your first game to set up capture and start mining.",
+      "addingGame": "Setting up capture…",
+      "addGameError": "Could not set up capture. Check that OBS is connected and try again.",
+      "chooseGame": "Choose a game",
+      "chooseGameHint": "Select a saved game, or add a new capture.",
+      "gameContext": "Game capture",
+      "gameOptions": "Game options",
+      "gameActions": "Actions for {name}",
+      "gameActionError": "Could not update this game. Please try again.",
+      "backToGame": "Back to game",
+      "textFeed": "Text feed",
+      "textFeedHint": "Read captured text and mine sentences in the Text Feed.",
+      "firstGameHint": "Open your game, then select its window below to set up capture.",
+      "addGame": "Add a game",
+      "addGameHint": "Capture another window, display, or capture card.",
+      "overlayHint": "Look up words and mine sentences as you play.",
+      "connections": "Connections"
+    },
     "status": {
       "title": "Status",
       "gsm": "GSM",
@@ -63,8 +116,11 @@
       "preview": "Preview",
       "captureCardPrefix": "Capture Card: {title}",
       "setupNewScene": "Setup New Game Capture:",
-      "refreshWindows": "Refresh windows",
-      "selectWindow": "Select Window",
+      "refreshWindows": "Refresh capture targets",
+      "selectWindow": "Select Capture Target",
+      "captureTargetLabel": "Capture Target:",
+      "sectionMonitors": "Monitor Capture",
+      "monitorCaptureTooltip": "Capture everything on the selected monitor with desktop audio from the default output device. Adds a separate audio source to this scene. Global desktop audio settings and automatic scene switching are unchanged.",
       "setupCapture": "Setup Capture",
       "setupCaptureTooltip": "Setup Capture adds the selected Window Capture or Game Capture source for windows, or Video Capture Device for capture cards and cameras.\nUse Game Capture for fullscreen games; use Window Capture when Game Capture shows black.\nOn Linux X11/Steam Deck, Setup Capture uses XComposite Window Capture. On Wayland, it uses OBS Screen Capture (PipeWire) and opens the system screen/window chooser.\nCapture-card game captures are created without automatic window-title switching.",
       "waylandPipewireOption": "Wayland screen capture (PipeWire)",
@@ -94,7 +150,11 @@
       "statusStopped": "Not running",
       "guide": "Setup Guide",
       "runOnStartup": "Run on startup",
-      "runOnStartupTooltip": "Start the GSM overlay automatically when GSM starts."
+      "runOnStartupTooltip": "Start the overlay when GSM starts and keep it running. For automatic game sessions, use Open and close with active game instead. Enabling either option turns the other off.",
+      "runWithActiveGame": "Open and close with active game",
+      "runWithActiveGameTooltip": "For every game, open the overlay when its capture or game window is detected and close it when the session ends. Brief detection gaps, alt-tab, and minimization do not close it. Enabling this turns Run on startup off.",
+      "recommended": "Recommended",
+      "settingsError": "Could not load or save overlay options. Reopen Home and try again."
     },
     "actions": {
       "title": "Utilities",
@@ -111,7 +171,7 @@
     },
     "support": {
       "text": "Support GSM",
-      "githubSponsors": "GitHub Sponsors",
+      "githubSponsors": "GitHub Sponsors (Preferred)",
       "kofi": "Ko-fi",
       "githubStar": "Star on GitHub (Free)"
     },
@@ -154,14 +214,28 @@
       "github": "GitHub",
       "discord": "Discord"
     },
+    "update": {
+      "available": "Update Available",
+      "previewDescription": "Development preview using the latest online release notes. Installation is disabled.",
+      "availableVersion": "Update available: {version}",
+      "title": "Update to {version}",
+      "restartDescription": "GSM will download the update and restart to install it.",
+      "install": "Update and Restart",
+      "notNow": "Not Now",
+      "installing": "Updating…",
+      "installingDescription": "Downloading the update. GSM will restart when it is ready.",
+      "installFailed": "The update could not be installed. Try again or choose Not Now.",
+      "notesUnavailable": "Release notes could not be loaded. You can retry or install the update now.",
+      "changed": "The available update has changed. Close this dialog and reopen it to review the latest release."
+    },
     "stats": {
       "loading": "Waiting for GSM stats to load..."
     },
     "console": {
       "openLogsFolder": "Open Logs Folder",
       "openLogsFolderTooltip": "Open logs folder",
-      "exportLogs": "Export Logs",
-      "exportLogsTooltip": "Export logs to a zip archive",
+      "exportLogs": "Export Anonymized Logs",
+      "exportLogsTooltip": "Export a ZIP with detected usernames, home paths, computer names, email/IP addresses, and common credentials redacted. Original logs are unchanged. Review before sharing.",
       "modeSimple": "Mode: Simple",
       "modeAdvanced": "Mode: Advanced",
       "modeSimpleTooltip": "Switch to Advanced logs (shows basic + background logs)",
@@ -275,16 +349,16 @@
     }
   },
   "captureWizard": {
-    "title": "Text Capture Wizard (WIP)",
-    "subtitle": "Finish text input, OCR fallback, and automation for this game.",
+    "title": "Text Capture Wizard",
+    "subtitle": "Learn your text capture options in four steps, or jump to the setting you need.",
     "breadcrumbLabel": "Text capture setup steps",
     "steps": {
-      "preview": "Preview",
+      "preview": "Capture",
       "agent": "Agent",
-      "hook": "Hooks",
+      "hook": "Texthook",
       "ocr": "OCR",
       "profile": "Profile",
-      "finish": "Review"
+      "finish": "Finalize"
     },
     "actions": {
       "deny": "Not now",
@@ -293,8 +367,8 @@
       "next": "Next"
     },
     "preview": {
-      "title": "Check the OBS preview",
-      "description": "GSM refreshes this preview every second and fits the source to the OBS canvas before each screenshot.",
+      "title": "Check your game capture",
+      "description": "GSM uses video capture for screenshots, clips, and OCR. Check that your game is visible below. If the preview is black, try switching the capture type.",
       "scene": "Scene",
       "executable": "Executable",
       "captureType": "Capture type",
@@ -328,16 +402,16 @@
       "useScript": "Use selected script"
     },
     "hook": {
-      "title": "Try Luna or Textractor",
-      "description": "Luna and Textractor hooks are mainly for visual novels. For video games, an Agent script or OCR is more likely to work; only use this if you see clean dialogue.",
+      "title": "Get text directly from the game",
+      "description": "Text hooks read text directly from the game, avoiding OCR recognition errors. Luna and Textractor are usually the best choice for visual novels.",
       "engine": "Engine",
       "luna": "Luna Hook",
       "textractor": "Textractor",
       "start": "Start hook engine",
       "running": "{count} usable hooks found",
       "notRunning": "Hook engine is not running.",
-      "waiting": "Waiting for hooks with text. Advance the game dialogue.",
-      "startFirst": "Start an engine to scan for hooks.",
+      "waiting": "Advance dialogue to find text. If no matching text appears, try Textractor or continue to OCR.",
+      "startFirst": "Start with Luna, advance dialogue in your game, then select the text that matches.",
       "noPreview": "No text preview yet",
       "refreshFailed": "Failed to refresh hooks.",
       "startFailed": "Failed to start hook engine.",
@@ -346,7 +420,7 @@
     },
     "ocr": {
       "title": "Choose the OCR area",
-      "description": "Draw an area around the game's dialogue. When the selector closes, GSM will scan it once so you can check the text it finds.",
+      "description": "OCR reads text from the game picture. It works with most games, including games played through a capture card. Select the dialogue area to get a text sample.",
       "reasonStable": "An OCR area keeps scans focused on the dialogue box.",
       "reasonNoise": "Smaller areas avoid menus, names, and UI noise.",
       "reasonFallback": "It still works for console games, protected engines, and capture cards.",
@@ -373,8 +447,8 @@
       "automationAutoDescription": "Continuously scan the selected area while the game is active."
     },
     "profile": {
-      "title": "Save this game setup",
-      "description": "Save automation for this OBS scene and optionally open GSM Profiles for a larger per-game profile split.",
+      "title": "Finalize this game setup",
+      "description": "Review your text source and choose what starts automatically next time.",
       "source": "Text source",
       "sourceAgent": "Agent script",
       "sourceLuna": "Luna Hook",
@@ -387,7 +461,7 @@
       "ocrNone": "No OCR",
       "ocrManual": "Manual OCR",
       "ocrAuto": "Auto OCR",
-      "launchOverlay": "Launch overlay with this game",
+      "launchOverlay": "Open and close overlay with this game",
       "openProfiles": "Open Profiles",
       "assignLabel": "Assign this scene to a GSM profile",
       "assignHint": "GSM will switch to this profile automatically whenever scene '{scene}' is active.",
@@ -414,6 +488,38 @@
     },
     "errors": {
       "contextFailed": "Failed to load the active capture."
+    },
+    "guided": {
+      "captureNext": "Capture looks right — choose text",
+      "hookNext": "Continue to OCR",
+      "finalize": "Continue to Finalize",
+      "saveAndClose": "Save and close",
+      "skipOcr": "Skip OCR and finalize",
+      "ocrOptional": "Your text hook is selected. You can skip OCR, or set it up for text the hook misses.",
+      "ocrGuide": "Select the dialogue area, check the sample, then choose when OCR runs.",
+      "hookGuide": "1. Start an engine. 2. Advance dialogue in your game. 3. Select the text that matches.",
+      "vnTitle": "Luna / Textractor · Best for visual novels",
+      "agentTitle": "Agent · Game-specific scripts",
+      "agentDescription": "Agent uses a script written for a specific game. Search manually if you already know which script you need.",
+      "agentRecommended": "Strong script match",
+      "agentMatchHint": "Matched against this game’s scene name, window title, or executable. Check the game and platform before using it.",
+      "agentNoMatch": "No strong script match found. Try Luna / Textractor for a visual novel, or continue to OCR.",
+      "useAgent": "Use this script",
+      "stopHook": "Stop engine",
+      "stoppingFailed": "Failed to stop the text hook.",
+      "selectedSource": "Selected: {source}",
+      "noSource": "No text source selected yet. Return to Texthook or OCR to set one up, or save only your capture preferences.",
+      "optionalSettings": "More options: overlay and GSM profile",
+      "noScene": "Start the game and select its capture on Home, then refresh.",
+      "useOcr": "Use OCR and finalize",
+      "keepHook": "Keep text hook and finalize",
+      "engineBusy": "Starting…",
+      "hookSelected": "Text hook selected. Continue to OCR for an optional fallback, or jump to Finalize.",
+      "ocrNotTested": "No sample yet. You can select an area now or use your existing OCR setup.",
+      "agentStart": "Start script",
+      "agentRunning": "Agent is running. Advance dialogue to check the captured text.",
+      "usingSaved": "Your saved setup is loaded. Jump to a step to adjust it.",
+      "otherGameRunning": "A text hook is running for {exe}. Stop it before starting one for this game."
     }
   },
   "install": {
@@ -478,6 +584,31 @@
     }
   },
   "settings": {
+    "workspace": {
+      "brandHint": "Preferences & tools",
+      "general": "General",
+      "generalHelp": "Choose your appearance, language, and startup behavior.",
+      "layout": "Tabs & windows",
+      "layoutHelp": "Choose the tabs you use and how GSM works with game windows.",
+      "updatesHelp": "Manage desktop and backend updates in one place.",
+      "backupsHelp": "Keep automatic database copies or create a backup of selected data.",
+      "storageHelp": "Manage where GSM keeps your settings, database, and downloaded tools.",
+      "appearance": "Appearance",
+      "behavior": "Startup & behavior",
+      "moreSettings": "GSM & overlay settings",
+      "autoSave": "Desktop preferences save automatically.",
+      "searchPlaceholder": "Search all settings…",
+      "searchResults": "Search results",
+      "clearSearch": "Clear search",
+      "openSection": "Open section",
+      "navigation": "Settings sections",
+      "selectiveBackup": "Selective backup & restore",
+      "statsOverview": "Overview",
+      "statsReading": "Reading statistics",
+      "statsGoals": "Goals",
+      "statsAnki": "Anki statistics",
+      "statsSearch": "Search"
+    },
     "hub": {
       "findSetting": "Find a Setting",
       "findDescription": "Search for what you want to change and GSM will open the right settings screen for you.",
@@ -517,7 +648,6 @@
       "themeHighContrast": "High Contrast",
       "language": "Display Language (AI):",
       "startMinimized": "Start Console Minimized:",
-      "showYuzuLauncher": "Show Yuzu Launcher:",
       "runTransparencyOnStartup": "Run Window Transparency Tool on Startup:",
       "runOverlayOnStartup": "Run Overlay on Startup:",
       "quitOnWindowClose": "Exit GSM when closing the window:",
@@ -627,6 +757,10 @@
     },
     "dataFolder": {
       "title": "Data Folder",
+      "intro": "Choose where GSM keeps your settings, database, logs, and downloaded tools. Changing this folder restarts GSM.",
+      "database": "Database: {path}",
+      "locationFile": "Where this choice is saved",
+      "locationHint": "A small data_dir.json file in your home .config/GameSentenceMiner folder remembers this location, even if you delete the original AppData folder. You can still edit its dataDir path manually while GSM is closed. Keep this file when cleaning up old data.",
       "description": "GSM configs, desktop app settings, overlay settings, and the database are copied. Chromium session/storage and Yomitan data are not copied; export your Yomitan dictionaries before changing folders and import them afterward. No source files are deleted.",
       "current": "Current folder: {path}",
       "original": "Original AppData folder: {path}",
@@ -836,6 +970,24 @@
     }
   },
   "launcher": {
+    "workspace": {
+      "brand": "Automation",
+      "tagline": "Game & scene behavior",
+      "sharedTitle": "Shared settings",
+      "allScenes": "Across all scenes",
+      "sceneHint": "Choose the OBS scene to configure.",
+      "sceneDescription": "Choose what happens when this OBS scene becomes active.",
+      "sharedDescription": "Set OCR overrides that apply across your game profiles.",
+      "autosave": "Saves automatically",
+      "ocrNoneHint": "Leave OCR off for this scene.",
+      "ocrAutoHint": "Continuously capture game text.",
+      "ocrManualHint": "Capture text with your OCR hotkey.",
+      "overlayHint": "Open the overlay when this scene becomes active.",
+      "overlayManaged": "Managed by the overlay options on Home.",
+      "sceneTitle": "Scene automation",
+      "manualOcrHint": "Keep Manual OCR available for profiles that do not use Auto OCR.",
+      "ignoreSceneHint": "Keep OCR running when you switch OBS scenes."
+    },
     "title": "Game Automation",
     "docsButton": "Auto Launcher Docs",
     "docsButtonTooltip": "Open Auto Launcher documentation",
@@ -890,7 +1042,7 @@
       "ocrNone": "None",
       "ocrAuto": "Auto OCR",
       "ocrManual": "Manual OCR",
-      "launchOverlay": "Launch Overlay With Game:",
+      "launchOverlay": "Open and Close Overlay With Active Game:",
       "noSceneHint": "Select or switch to an OBS game to configure automation."
     },
     "scriptPicker": {
@@ -946,7 +1098,7 @@
       "textHookLuna": "Auto-launch LunaTranslator when this game becomes active.",
       "launchDelay": "Delay before starting the selected text hook launcher for this game.",
       "agentScript": "Agent script path for this game. You can set manually, browse, or search.",
-      "launchOverlay": "Start the GSM overlay while this game's session is active, and close the auto-launched overlay when the game/session ends.",
+      "launchOverlay": "Open the overlay when this game's capture or window is detected. Close it after capture or window loss is confirmed, or when switching to an OBS scene where this option is off. Alt-tab and minimization keep it running. Home → Overlay → Open and close with active game applies this to all games. This option is unavailable while either that option or Run on startup is enabled; your per-game choice is kept.",
       "browseScript": "Open file picker and choose an Agent script for this game.",
       "searchScript": "Search all scripts under Agent Scripts Path, ranked by similarity to the game.",
       "downloadAgent": "Download latest Agent from official GitHub releases. Choose any install folder.",
@@ -962,7 +1114,45 @@
     }
   },
   "ocr": {
+    "workspace": {
+      "recognition": "Recognition",
+      "filtering": "Image & Output",
+      "comparison": "Comparison",
+      "shortcuts": "Shortcuts",
+      "tools": "Tools",
+      "navigation": "OCR views",
+      "scanSettings": "Scan settings",
+      "imageSettings": "Image settings",
+      "quickCapture": "Quick capture",
+      "quickCaptureHint": "Use a shortcut or choose an action.",
+      "startToCapture": "Start OCR to use quick capture.",
+      "textOutput": "Text output",
+      "copyText": "Copy text",
+      "lineBreaks": "Keep line breaks",
+      "copyMode": "Copy text: {mode}",
+      "lineBreaksMode": "Keep line breaks: {mode}",
+      "areaTools": "Area tools and guide",
+      "singlePassSummary": "{engine} · every {rate}s",
+      "twoPassSummary": "{stability} → {engine} · every {rate}s",
+      "comparisonPrimary": "Primary thresholds",
+      "comparisonTruncation": "Truncation rules",
+      "comparisonSubset": "Subset & blocks",
+      "resetDefaults": "Reset defaults",
+      "toolsDiagnostics": "Diagnostics & runtime",
+      "toolsPackages": "Packages",
+      "toolsFiles": "Configs & files",
+      "consoleExpand": "Expand console",
+      "consoleCompact": "Compact console",
+      "consoleDockRight": "Split view",
+      "consoleDockBottom": "Bottom dock",
+      "pipelineCapture": "Capture",
+      "pipelineStability": "Pass 1 · Stability",
+      "pipelineMain": "Main OCR",
+      "pipelineCadence": "Cadence"
+    },
     "sceneAndAreas": {
+      "autostart": "Autostart OCR:",
+      "autostartHint": "Choose which OCR mode starts automatically when this game is active. This setting is shared with Game Automation.",
       "title": "Game & Areas",
       "areaCount": "{count} area",
       "areaCountPlural": "{count} areas",
@@ -981,6 +1171,8 @@
       "advanced": "Advanced",
       "scanRate": "Scan Rate (s):",
       "scanSpeed": "Scan Speed:",
+      "onlineScans": "Use online scans for better accuracy",
+      "onlineScansHelp": "Off: ScreenAI reads text locally. On: send captured text areas to Google Lens for potentially better accuracy. Internet access is required; VPNs, location, or connection issues can slow scans down.",
       "language": "Language:",
       "scanImageQuality": "Scan Image Quality",
       "furiganaFilter": "Furigana Filter",
@@ -1009,23 +1201,74 @@
     "comparison": {
       "title": "Text Comparison Tuning",
       "expertTitle": "Expert Heuristics",
-      "duplicateThreshold": { "label": "Duplicate Match Threshold (%)", "title": "Higher values are stricter. Raise this if different lines are being treated as duplicates." },
-      "changeThreshold": { "label": "Text Change Threshold (%)", "title": "Lower values trigger OCR2 sooner on partial changes. Higher values wait for clearer changes." },
-      "evolvingPrefix": { "label": "Evolving Prefix Match (%)", "title": "Used when checking whether a short line looks like the beginning of a longer line." },
-      "truncationFallbackMin": { "label": "Truncation Fallback Min Threshold (%)", "title": "Minimum compare threshold required before prefix or suffix truncation matching is allowed." },
-      "truncationStrictMin": { "label": "Truncation Strict Threshold (%)", "title": "Above this threshold, GSM also requires a stronger base similarity before treating a truncation as the same text." },
-      "truncationMargin": { "label": "Truncation Base Margin", "title": "How far below the compare threshold the base similarity may be before truncation fallback is rejected." },
-      "truncationMinLength": { "label": "Truncation Min Length (chars)", "title": "Shortest normalized string length allowed for truncation matching." },
-      "truncationMinRatio": { "label": "Truncation Min Length Ratio (%)", "title": "How much of the longer line the shorter line must cover before truncation matching is considered." },
-      "subsetChunkMinLength": { "label": "Subset Chunk Min Length (chars)", "title": "Incoming OCR chunks shorter than this skip the chunk-coverage fallback unless they are exact matches." },
-      "shortChunkLimit": { "label": "Short Chunk Limit (chars)", "title": "Chunks at or below this length use the smaller matching-block minimum." },
-      "shortChunkMinSize": { "label": "Short Chunk Match Min Size", "title": "Minimum contiguous match size counted for short chunks." },
-      "defaultMinSize": { "label": "Default Match Min Size", "title": "Minimum contiguous match size counted for longer chunks." },
-      "coverageFloor": { "label": "Subset Coverage Floor (%)", "title": "Lowest allowed chunk-coverage requirement for dedupe fallback." },
-      "coverageCeiling": { "label": "Subset Coverage Ceiling (%)", "title": "Highest allowed chunk-coverage requirement for dedupe fallback." },
-      "coverageOffset": { "label": "Coverage Threshold Offset", "title": "Offset applied before converting the current compare threshold into a coverage requirement." },
-      "longestBlockMin": { "label": "Longest Block Minimum (chars)", "title": "Minimum contiguous block size required in subset coverage mode." },
-      "longestBlockDivisor": { "label": "Longest Block Divisor", "title": "Larger values reduce the required contiguous block length for longer chunks." }
+      "duplicateThreshold": {
+        "label": "Duplicate Match Threshold (%)",
+        "title": "Higher values are stricter. Raise this if different lines are being treated as duplicates."
+      },
+      "changeThreshold": {
+        "label": "Text Change Threshold (%)",
+        "title": "Lower values trigger OCR2 sooner on partial changes. Higher values wait for clearer changes."
+      },
+      "evolvingPrefix": {
+        "label": "Evolving Prefix Match (%)",
+        "title": "Used when checking whether a short line looks like the beginning of a longer line."
+      },
+      "truncationFallbackMin": {
+        "label": "Truncation Fallback Min Threshold (%)",
+        "title": "Minimum compare threshold required before prefix or suffix truncation matching is allowed."
+      },
+      "truncationStrictMin": {
+        "label": "Truncation Strict Threshold (%)",
+        "title": "Above this threshold, GSM also requires a stronger base similarity before treating a truncation as the same text."
+      },
+      "truncationMargin": {
+        "label": "Truncation Base Margin",
+        "title": "How far below the compare threshold the base similarity may be before truncation fallback is rejected."
+      },
+      "truncationMinLength": {
+        "label": "Truncation Min Length (chars)",
+        "title": "Shortest normalized string length allowed for truncation matching."
+      },
+      "truncationMinRatio": {
+        "label": "Truncation Min Length Ratio (%)",
+        "title": "How much of the longer line the shorter line must cover before truncation matching is considered."
+      },
+      "subsetChunkMinLength": {
+        "label": "Subset Chunk Min Length (chars)",
+        "title": "Incoming OCR chunks shorter than this skip the chunk-coverage fallback unless they are exact matches."
+      },
+      "shortChunkLimit": {
+        "label": "Short Chunk Limit (chars)",
+        "title": "Chunks at or below this length use the smaller matching-block minimum."
+      },
+      "shortChunkMinSize": {
+        "label": "Short Chunk Match Min Size",
+        "title": "Minimum contiguous match size counted for short chunks."
+      },
+      "defaultMinSize": {
+        "label": "Default Match Min Size",
+        "title": "Minimum contiguous match size counted for longer chunks."
+      },
+      "coverageFloor": {
+        "label": "Subset Coverage Floor (%)",
+        "title": "Lowest allowed chunk-coverage requirement for dedupe fallback."
+      },
+      "coverageCeiling": {
+        "label": "Subset Coverage Ceiling (%)",
+        "title": "Highest allowed chunk-coverage requirement for dedupe fallback."
+      },
+      "coverageOffset": {
+        "label": "Coverage Threshold Offset",
+        "title": "Offset applied before converting the current compare threshold into a coverage requirement."
+      },
+      "longestBlockMin": {
+        "label": "Longest Block Minimum (chars)",
+        "title": "Minimum contiguous block size required in subset coverage mode."
+      },
+      "longestBlockDivisor": {
+        "label": "Longest Block Divisor",
+        "title": "Larger values reduce the required contiguous block length for longer chunks."
+      }
     },
     "hotkeys": {
       "title": "Hotkeys",
@@ -1034,6 +1277,7 @@
       "manual": "Manual (Green Areas)",
       "menu": "Menu (Purple Areas)",
       "areaSelect": "Area Select",
+      "addArea": "Add new area",
       "wholeWindow": "Whole Window",
       "pause": "Pause",
       "keyboard": "Keyboard",
@@ -1147,6 +1391,7 @@
       "manualDelayGamepadOnly": "Apply the manual green-area scan delay only when the action is triggered from a gamepad.",
       "menuHotkey": "Runs the Main OCR (OCR 2) once on the configured purple menu areas. Press Escape to clear.",
       "areaSelectHotkey": "On press, lets you select a temporary area to OCR one time. Useful for menus. Press Escape to clear.",
+      "addAreaHotkey": "Draw one new area, save it, and apply it to running OCR. Existing areas are kept. Choose Normal for automatic capture or Secondary for the Menu hotkey. Press Escape here to clear the binding.",
       "wholeWindowHotkey": "Runs a one-time OCR scan on the full active OCR source (typically your OBS game source), bypassing area rectangles. Press Escape to clear.",
       "pauseHotkey": "Pauses or resumes OCR scanning everywhere. Useful during cutscenes or when you want OCR temporarily out of the way. Press Escape to clear.",
       "processPriority": "Sets the process priority for the OCR Python process on Windows. Higher values may improve OCR responsiveness but can reduce system responsiveness.",
@@ -1173,6 +1418,8 @@
       "comparison": "Dedupe and change-detection thresholds that decide when text is new, stable, or a subset of a previous line."
     },
     "runtime": {
+      "failedLoadAutostart": "Failed to load OCR autostart settings.",
+      "failedSaveAutostart": "Failed to save OCR autostart settings.",
       "idle": "Idle",
       "startingAuto": "Starting auto OCR...",
       "startingManual": "Starting manual OCR...",
@@ -1259,9 +1506,143 @@
       "importFailed": "Import failed.",
       "areaConfigExported": "OCR area config copied to clipboard.",
       "exportFailed": "Export failed."
+    },
+    "desk": {
+      "preview": {
+        "live": "Live preview",
+        "paused": "Preview paused",
+        "loading": "Loading game preview…",
+        "unavailable": "Preview unavailable · showing saved areas",
+        "stale": "Preview unavailable · last frame",
+        "textBoxes": "Text boxes",
+        "pause": "Pause preview",
+        "resume": "Resume preview",
+        "detected": "{count} text boxes · latest scan",
+        "waiting": "Waiting for an OCR scan",
+        "startHint": "Start OCR to see text boxes"
+      },
+      "brandHint": "Game text capture",
+      "workspace": "OCR workspace",
+      "capture": "Capture",
+      "textMatching": "Text matching",
+      "captureAreas": "Capture areas",
+      "editAreas": "Edit areas",
+      "thisSession": "This session",
+      "engine": "Text recognition",
+      "stability": "Change detection",
+      "adjustRecognition": "Adjust recognition",
+      "editShortcuts": "Edit shortcuts",
+      "unbound": "No shortcut",
+      "autoMode": "Automatic capture",
+      "manualMode": "Manual capture",
+      "settingsSaved": "Changes save automatically",
+      "closeConsole": "Back to workspace",
+      "layoutOverview": "Saved layout",
+      "wholeWindow": "Whole window",
+      "wholeWindowHint": "Draw areas to focus on the text you want.",
+      "savedLayout": "Areas are saved",
+      "savedLayoutHint": "Open the selector to inspect this layout.",
+      "areaKinds": {
+        "normal": "Text",
+        "secondary": "Menu",
+        "excluded": "Excluded",
+        "black-hole": "Black hole",
+        "exclusive": "Exclusive"
+      },
+      "viewHelp": {
+        "capture": "Your capture layout, session settings, and one-time scans.",
+        "recognition": "Choose how text is detected and read.",
+        "filtering": "Clean up the captured image and choose how text is delivered.",
+        "comparison": "Fine-tune when dialogue is new, stable, or repeated.",
+        "shortcuts": "Capture text without leaving your game.",
+        "tools": "Manage OCR packages, diagnostics, and configuration files.",
+        "console": "Live OCR output and diagnostics. Logs are kept while you use other pages."
+      },
+      "shortcutHelp": "Select a binding and press a key combination. Press Escape to clear it.",
+      "openAreaSelector": "Open Area Selector",
+      "editor": {
+        "edit": "Edit areas in preview",
+        "areaType": "Draw",
+        "undo": "Undo",
+        "clear": "Clear all",
+        "selectedArea": "Selected area",
+        "none": "None",
+        "areaLabel": "{number} · {kind}",
+        "remove": "Remove",
+        "cancel": "Cancel",
+        "save": "Save areas",
+        "saving": "Saving…",
+        "canvas": "Draw OCR areas on the game preview",
+        "hint": "Drag to draw. Click an area to select it. Preview is paused; save to apply your changes.",
+        "legacyHint": "Use Open Area Selector to edit this older or unsupported layout.",
+        "errors": {
+          "sceneChanged": "The scene changed. Cancel and reopen the preview editor for the current scene.",
+          "conflict": "The saved areas changed elsewhere. Cancel and reload the scene before editing again.",
+          "invalid": "This layout cannot be saved here. Use Open Area Selector.",
+          "failed": "Could not save areas. Your changes are still here; please try again."
+        },
+        "keyboardModifiers": "Keyboard modifiers",
+        "modifierHint": "Shift: Excluded · Ctrl: Menu · Alt: Exclusive · Ctrl+Alt: Black hole"
+      }
     }
   },
   "texthook": {
+    "workspace": {
+      "title": "Text hook",
+      "brandHint": "Direct game text",
+      "currentGame": "Current game",
+      "navigation": "Text hook views",
+      "live": "Live text",
+      "liveHelp": "Choose a hook and check that its output matches the dialogue in your game.",
+      "engine": "Engine & script",
+      "output": "Output & timing",
+      "outputHelp": "Fine-tune text delivery, revision timing, and the maximum text length.",
+      "tools": "Tools",
+      "toolsHelp": "Learn about text hooking and manage installed engines.",
+      "noHookSelected": "No hook selected",
+      "logHelp": "Messages from the hook engine for this session.",
+      "closeLog": "Back to workspace",
+      "clearLog": "Clear log"
+    },
+    "updates": {
+      "title": "LunaHook & Textractor",
+      "description": "New builds download in the background and are applied when no text hook is running. Both engines are updated together.",
+      "settings": "Engine settings",
+      "automatic": "Update automatically",
+      "automaticOn": "Automatic updates on",
+      "automaticOff": "Automatic updates off",
+      "versionChoice": "Engine package version",
+      "installSelected": "Install selected version",
+      "updateLatest": "Update to latest",
+      "recommended": "Recommended",
+      "latest": "Latest",
+      "pinHint": "You can upgrade or downgrade both engines together. Automatic updates turn off when you install a selected version, keeping your choice until you change it or enable automatic updates again.",
+      "buildVersions": "LunaHook {luna} · Textractor {textractor}",
+      "verificationHint": "Every file is verified before GSM switches packages. The previous package is kept.",
+      "repair": "Repair / reinstall",
+      "updateNow": "Update now",
+      "install": "Install engines",
+      "verifying": "Verifying downloaded files…",
+      "installing": "Installing verified update…",
+      "waiting": "Update verified — installs when the active hook stops.",
+      "failed": "Engine update failed. Check again or reinstall to retry.",
+      "preferenceFailed": "Could not save the automatic update setting.",
+      "installed": "Installed package: {version}",
+      "available": "Available package: {version}",
+      "unknownVersion": "unknown version",
+      "notInstalled": "Engines are not installed or need repair.",
+      "check": "Check now",
+      "checking": "Checking for engine updates…",
+      "checkFailed": "Could not check for engine updates. Try again.",
+      "updateAvailable": "Engine update available.",
+      "upToDate": "Up to date",
+      "download": "Download/update engines",
+      "downloading": "Downloading engines…",
+      "downloadFailed": "Could not download hook engines. Try again.",
+      "ready": "Hook engines are ready.",
+      "stopFirst": "Stop the active text hook before downloading engines.",
+      "progress": "Downloading hook engines ({current}/{total}): {file}"
+    },
     "notice": {
       "title": "About text hooking",
       "description": "Text hooking captures text directly from a running game, which can provide cleaner and more accurate text than OCR when the game is compatible.",
@@ -1315,8 +1696,8 @@
       "title": "Agent Script",
       "scriptPath": "Script path:",
       "scriptPlaceholder": "Select a .js Agent script",
-      "search": "Search",
-      "browse": "Browse",
+      "search": "Search scripts",
+      "browse": "Choose file…",
       "save": "Save",
       "noScripts": "No Agent scripts were found.",
       "pickerTitle": "Select Agent Script",
@@ -1329,8 +1710,10 @@
       "runDetachedHint": "GSM reconnects to the running Agent session the next time it opens."
     },
     "profile": {
-      "title": "Saved Profile",
+      "title": "Save for next time",
       "saved": "Saved",
+      "recommended": "Recommended",
+      "saveHint": "Save a working hook to reuse it next time.",
       "autoHook": "Auto-attach saved hook on next start",
       "copyToClipboard": "Copy processed text to clipboard",
       "flushDelay": "Text revision window (ms):",
@@ -1352,11 +1735,26 @@
       "rowLabel": "Select hook #{id}: {name}",
       "searchTitle": "Hook Search",
       "waiting": "Waiting for hooks. Trigger some text in the game.",
-      "notRunning": "Click 'Start' to start the hook engine.",
-      "noTextYet": "(no text yet)"
+      "notRunning": "Start text capture to find hooks.",
+      "noTextYet": "(no text yet)",
+      "rankingHint": "Readable text matching your target language ({language}) appears first. Language hints use writing systems and are approximate. Your selected hook stays visible.",
+      "readabilityHint": "Readable text appears first. Your selected hook stays visible.",
+      "showNoise": "Show likely noise ({count})",
+      "onlyNoise": "Only likely noise so far. Show likely noise to inspect it, or advance the text in the game.",
+      "quality": {
+        "targetLanguage": "Likely language match",
+        "possibleLanguage": "Possible language match",
+        "readable": "Readable text",
+        "mixed": "Text mixed with noise",
+        "paths": "Paths or technical text",
+        "garbled": "Possibly garbled",
+        "repetitive": "Repetitive text",
+        "symbols": "Mostly numbers or symbols"
+      }
     },
     "output": {
       "title": "Selected Hook Output",
+      "checkHint": "Check that this matches the text in your game.",
       "waiting": "Waiting for text from the selected hook…",
       "selectHook": "Select a hook from the list to preview its text."
     },
@@ -1366,13 +1764,21 @@
     },
     "status": {
       "attached": "Attached",
+      "starting": "Starting",
+      "waitingForText": "Waiting for text",
+      "receiving": "Receiving text",
       "ready": "Ready",
       "noTarget": "No Target"
+    },
+    "layout": {
+      "captureOptions": "Capture options",
+      "troubleshooting": "Troubleshooting"
     },
     "actions": {
       "start": "Start",
       "searchHooks": "Search for hooks",
-      "stop": "Stop"
+      "stop": "Stop",
+      "preparing": "Preparing text capture…"
     },
     "dev": {
       "sendLargePayload": "Send random Japanese payload ({size} characters)",
@@ -1439,6 +1845,23 @@
     "cancel": "Cancel"
   },
   "speechRecognition": {
+    "workspace": {
+      "title": "Windows Voice",
+      "brandHint": "Speech recognition",
+      "capture": "Live transcript",
+      "captureHelp": "Capture spoken dialogue from the game in your selected OBS scene.",
+      "advanced": "Advanced",
+      "activity": "Activity log",
+      "navigation": "Windows Voice views",
+      "session": "Speech recognition session",
+      "unsaved": "Unsaved changes",
+      "transcript": "Recognized dialogue",
+      "clearText": "Clear text",
+      "interim": "Listening…",
+      "waiting": "Waiting for dialogue from the game…",
+      "empty": "Start speech recognition to see dialogue here.",
+      "forwarding": "Recognized dialogue follows your GSM text processing rules."
+    },
     "title": "Windows Speech Recognition",
     "subtitle": "Run speech recognition for the current OBS scene and send recognized dialogue through GSM's text pipeline.",
     "experimental": "Experimental · Windows only",
@@ -1530,7 +1953,7 @@
       "removeNonJapanese": "Remove Non-Japanese Characters",
       "removeNonJapaneseDesc": "Filter out characters not in the Shift-JIS character set",
       "removeNewlines": "Remove Newlines",
-      "removeNewlinesDesc": "Join all lines into a single line separated by spaces",
+      "removeNewlinesDesc": "Remove line breaks without adding spaces",
       "removeNumbers": "Remove Numbers",
       "removeNumbersDesc": "Strip all numeric digits (0-9)",
       "removeEnglish": "Remove English Letters",
@@ -1555,6 +1978,7 @@
       "normalizeForm": "Form:"
     },
     "rules": {
+      "mode": "Rule type",
       "addRule": "+ Add Rule",
       "toggleEnabled": "Toggle rule",
       "plain": "Plain",
@@ -1564,6 +1988,17 @@
       "caseSensitive": "Case sensitive",
       "wholeWord": "Whole word",
       "remove": "Remove rule"
+    },
+    "workspace": {
+      "eyebrow": "Captured text",
+      "description": "Clean up captured text and see the result as you edit.",
+      "unsaved": "Unsaved changes",
+      "saved": "Changes saved",
+      "enabledCount": "{count} of {total} enabled",
+      "live": "Live",
+      "sample": "Sample",
+      "previewHint": "Preview uses your current rules, including unsaved changes.",
+      "followLatest": "Follow latest game text"
     }
   }
 }

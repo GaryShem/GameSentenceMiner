@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import importlib.resources as resources
+from importlib import resources
+from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
@@ -15,12 +16,13 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from typing import TYPE_CHECKING
 
+from GameSentenceMiner.ui.config.anki_setup import open_recommended_anki_setup
 from GameSentenceMiner.ui.config.safety import safe_config_call, safe_config_callback
-from ..labels import LabelColor
 from GameSentenceMiner.util.config.configuration import PACKAGE_NAME
 from GameSentenceMiner.util.docs import DOCS_URLS
+
+from ..labels import LabelColor
 
 if TYPE_CHECKING:
     from GameSentenceMiner.ui.config_gui_qt import ConfigWindow
@@ -108,11 +110,12 @@ def build_anki_general_tab(window: ConfigWindow, i18n: dict) -> QWidget:
         window._create_labeled_widget(tabs_i18n, "anki", "enabled", color=LabelColor.RECOMMENDED, bold=True),
         window.anki_enabled_check,
     )
-    layout.addRow(
-        window._create_labeled_widget(tabs_i18n, "anki", "update_anki"),
-        window.update_anki_check,
-    )
     layout.addRow(window._create_labeled_widget(tabs_i18n, "anki", "url"), window.anki_url_edit)
+    window.anki_recommended_setup_button = QPushButton("Set up recommended note type: Lapis, Kiku, Senren…")
+    window.anki_recommended_setup_button.clicked.connect(
+        safe_config_callback(lambda: open_recommended_anki_setup(window), name="anki.recommended_setup")
+    )
+    layout.addRow(window.anki_recommended_setup_button)
     layout.addRow(
         QLabel("Documentation:"),
         window._create_docs_links_widget([("Anki Guide", DOCS_URLS["anki_enhancement"])]),
@@ -292,6 +295,20 @@ def build_anki_confirmation_tab(window: ConfigWindow, i18n: dict) -> QWidget:
         ),
         window.show_update_confirmation_dialog_check,
     )
+    skip_unvoiced_label = window._create_labeled_widget(
+        tabs_i18n,
+        "anki",
+        "skip_confirmation_for_unvoiced",
+        (
+            "Warning: Skip confirmation when VAD detects no voice. The confirmation window was originally "
+            "intended to let you double-check VAD results on unvoiced lines. Skipping it can leave missed "
+            "speech unnoticed and create cards without voice audio."
+        ),
+        color=LabelColor.WARNING,
+        bold=True,
+    )
+    window.anki_skip_confirmation_for_unvoiced_check.setToolTip(skip_unvoiced_label.toolTip())
+    layout.addRow(skip_unvoiced_label, window.anki_skip_confirmation_for_unvoiced_check)
     layout.addRow(
         window._create_labeled_widget(
             tabs_i18n,
@@ -323,6 +340,15 @@ def build_anki_confirmation_tab(window: ConfigWindow, i18n: dict) -> QWidget:
         window._create_labeled_widget(
             tabs_i18n,
             "anki",
+            "confirmation_audio_step",
+            "Seconds added by each audio expansion button click in the confirmation dialog.",
+        ),
+        window.anki_confirmation_audio_step_combo,
+    )
+    layout.addRow(
+        window._create_labeled_widget(
+            tabs_i18n,
+            "anki",
             "confirmation_gamepad_enabled",
             "Enable gamepad bindings for the Anki confirmation dialog.",
         ),
@@ -339,11 +365,16 @@ def build_anki_confirmation_tab(window: ConfigWindow, i18n: dict) -> QWidget:
         ("confirmation_gamepad_focus_left", window.anki_confirmation_gamepad_focus_left_combo),
         ("confirmation_gamepad_focus_right", window.anki_confirmation_gamepad_focus_right_combo),
         ("confirmation_gamepad_activate", window.anki_confirmation_gamepad_activate_combo),
+        ("confirmation_gamepad_play_audio", window.anki_confirmation_gamepad_play_audio_combo),
         ("confirmation_gamepad_confirm_with_audio", window.anki_confirmation_gamepad_confirm_with_audio_combo),
         (
             "confirmation_gamepad_confirm_without_audio",
             window.anki_confirmation_gamepad_confirm_without_audio_combo,
         ),
+        ("confirmation_gamepad_add_previous_line", window.anki_confirmation_gamepad_add_previous_line_combo),
+        ("confirmation_gamepad_add_next_line", window.anki_confirmation_gamepad_add_next_line_combo),
+        ("confirmation_gamepad_expand_audio_start", window.anki_confirmation_gamepad_expand_audio_start_combo),
+        ("confirmation_gamepad_expand_audio_end", window.anki_confirmation_gamepad_expand_audio_end_combo),
     ):
         gamepad_bindings_layout.addRow(
             window._create_labeled_widget(tabs_i18n, "anki", label_key),

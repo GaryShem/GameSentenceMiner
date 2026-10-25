@@ -6,6 +6,7 @@ import { SettingsTab } from "./components/tabs/SettingsTab";
 import { SetupWizard } from "./components/SetupWizard";
 import { InstallSessionModal } from "./components/InstallSessionModal";
 import { WhatsChangedDialog } from "./components/WhatsChangedDialog";
+import { AppUpdateNotice } from "./components/AppUpdateNotice";
 import type { ControlledTab } from "./types/models";
 import { OCRTab } from "./components/tabs/OCRTab";
 import { getDevPreviewTab } from "./lib/devPreview";
@@ -600,21 +601,21 @@ function ConsolePanel({
         <button
           className="console-action-button"
           onClick={() => void openLogsFolder()}
-          title={t("app.console.openLogsFolderTooltip")}
+          data-tip={t("app.console.openLogsFolderTooltip")}
         >
           {t("app.console.openLogsFolder")}
         </button>
         <button
           className="console-action-button"
           onClick={() => void exportLogs()}
-          title={t("app.console.exportLogsTooltip")}
+          data-tip={t("app.console.exportLogsTooltip")}
         >
           {t("app.console.exportLogs")}
         </button>
         <button
           className={`console-mode-toggle ${consoleMode}`}
           onClick={toggleConsoleMode}
-          title={consoleMode === 'simple' ? t('app.console.modeSimpleTooltip') : t('app.console.modeAdvancedTooltip')}
+          data-tip={consoleMode === 'simple' ? t('app.console.modeSimpleTooltip') : t('app.console.modeAdvancedTooltip')}
         >
           {consoleMode === 'simple' ? t('app.console.modeSimple') : t('app.console.modeAdvanced')}
         </button>
@@ -958,16 +959,6 @@ export default function App() {
     }
   }, [desktopChangelog, desktopChangelogMode]);
 
-  useEffect(() => {
-    if (
-      desktopChangelog &&
-      desktopChangelogMode === "update" &&
-      installSession?.origin === "backend_update"
-    ) {
-      setDesktopUpdateBackendStatus(installSession.status);
-    }
-  }, [desktopChangelog, desktopChangelogMode, installSession]);
-
   const selectTab = useCallback(
     (tab: TabId) => {
       if (!isTabVisible(tab)) {
@@ -1090,56 +1081,37 @@ export default function App() {
 
   useEffect(() => {
     let disposed = false;
+    let receivedLiveSnapshot = false;
+
+    const applySnapshot = (snapshot: InstallSessionSnapshot | null) => {
+      if (snapshot?.origin === "backend_update") {
+        // Remember terminal results even if the changelog has not loaded yet.
+        lastBackendUpdateStatusRef.current = snapshot.status;
+        if (desktopChangelogRef.current && desktopChangelogModeRef.current === "update") {
+          setDesktopUpdateBackendStatus(snapshot.status);
+        }
+      }
+      setInstallSession(snapshot?.status === "completed" ? null : snapshot);
+    };
+    const onSnapshot = (_event: unknown, payload: unknown) => {
+      receivedLiveSnapshot = true;
+      applySnapshot(payload as InstallSessionSnapshot);
+    };
+    const offSnapshot = window.ipcRenderer.on(
+      "install-session.snapshot",
+      onSnapshot
+    );
+    const offFinished = window.ipcRenderer.on(
+      "install-session.finished",
+      onSnapshot
+    );
 
     void window.ipcRenderer
       .invoke<InstallSessionSnapshot | null>("install-session.getActive")
       .then((snapshot) => {
-        if (!disposed) {
-          setInstallSession(snapshot);
-        }
+        // A response captured before a finish/retry must not overwrite that event.
+        if (!disposed && !receivedLiveSnapshot) applySnapshot(snapshot);
       });
-
-    const offSnapshot = window.ipcRenderer.on(
-      "install-session.snapshot",
-      (_event, payload) => {
-        const snapshot = payload as InstallSessionSnapshot;
-        setInstallSession(snapshot);
-        if (snapshot.origin === "backend_update") {
-          lastBackendUpdateStatusRef.current = "running";
-        }
-        if (
-          snapshot.origin === "backend_update" &&
-          desktopChangelogRef.current &&
-          desktopChangelogModeRef.current === "update"
-        ) {
-          setDesktopUpdateBackendStatus("running");
-        }
-      }
-    );
-
-    const offFinished = window.ipcRenderer.on(
-      "install-session.finished",
-      (_event, payload) => {
-        const snapshot = payload as InstallSessionSnapshot;
-        if (snapshot.origin === "backend_update") {
-          lastBackendUpdateStatusRef.current = snapshot.status;
-        }
-        if (
-          snapshot.origin === "backend_update" &&
-          desktopChangelogRef.current &&
-          desktopChangelogModeRef.current === "update"
-        ) {
-          setDesktopUpdateBackendStatus(snapshot.status);
-          setInstallSession(snapshot.status === "failed" ? snapshot : null);
-          return;
-        }
-        if (snapshot?.status === "failed") {
-          setInstallSession(snapshot);
-          return;
-        }
-        setInstallSession(null);
-      }
-    );
 
     return () => {
       disposed = true;
@@ -1256,9 +1228,10 @@ export default function App() {
           ))}
         </div>
         <div className="header-links">
+          <AppUpdateNotice />
           <button
             className="icon-link"
-            title={t("app.header.github")}
+            data-tip={t("app.header.github")}
             aria-label={t("app.header.github")}
             onClick={() =>
               void window.ipcRenderer.invoke(
@@ -1273,7 +1246,7 @@ export default function App() {
           </button>
           <button
             className="icon-link"
-            title={t("app.header.discord")}
+            data-tip={t("app.header.discord")}
             aria-label={t("app.header.discord")}
             onClick={() =>
               void window.ipcRenderer.invoke(

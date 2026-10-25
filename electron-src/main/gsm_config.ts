@@ -72,6 +72,18 @@ export function resolveSinglePortFromConfigData(configData: unknown): number {
     return normalizePort(profileData.general.texthooker_port);
 }
 
+/** Legacy opt-in used when migrating to the overlay's dictionary selection. */
+export function resolveHachidoriEnabledFromConfigData(configData: unknown): boolean {
+    if (!isJsonObject(configData) || !isJsonObject(configData.experimental)) {
+        return false;
+    }
+
+    return (
+        configData.experimental.enable_experimental_features === true &&
+        configData.experimental.enable_hachidori === true
+    );
+}
+
 export interface GsmProfileList {
     profiles: string[];
     currentProfile: string;
@@ -130,4 +142,25 @@ export function getConfiguredSinglePort(
     } catch {
         return DEFAULT_GSM_SINGLE_PORT;
     }
+}
+
+/** Read the learning language from the active GSM profile, not the desktop locale. */
+export function getConfiguredTargetLanguage(
+    configPath = path.join(DEFAULT_GSM_BASE_DIR, 'config.json')
+): string {
+    try {
+        const raw = fs.readFileSync(configPath, 'utf8').replace(/^\uFEFF/, '');
+        const config: unknown = JSON.parse(raw);
+        const profile = isJsonObject(config) ? getProfileData(config) : null;
+        const language = profile && isJsonObject(profile.general) ? profile.general.target_language : null;
+        if (typeof language === 'string' && language.trim()) return language.trim().toLowerCase();
+    } catch {
+        // Match GeneralConfig's default for a missing or older configuration.
+    }
+    return 'ja';
+}
+
+/** Build a URL to the local Python backend (single-port mode). */
+export function gsmBackendUrl(routePath: string): string {
+    return `http://localhost:${getConfiguredSinglePort()}${routePath}`;
 }

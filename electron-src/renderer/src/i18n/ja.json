@@ -1,5 +1,58 @@
 {
+  "gameBackground": {
+    "title": "ゲームのバックグラウンド動作（実験的）",
+    "help": "このシーンでキャプチャするゲーム用の小さな Windows フックです。設定は実行ファイルごとに保存されます。",
+    "enabled": "このゲームに自動適用する",
+    "keepRendering": "フォーカスがなくても描画を続ける",
+    "blockGamepad": "フォーカスがないときはゲームパッド入力を遮断する",
+    "target": "{name}（PID {pid}）",
+    "noInput": "対応するコントローラー API はまだ検出されていません。XInput と DirectInput 8 のゲームパッドに対応しています。",
+    "partial": "一部のフックを設定できませんでした。動作は部分的に制限されます。",
+    "error": "フックエラー: {error}",
+    "retry": "再試行",
+    "limitations": "アンチチートのないオフラインゲーム向けです。Special K を終了してからお試しください。エンジンによっては停止する場合があります。フックを完全に取り除くにはゲームを再起動してください。",
+    "status": {
+      "disabled": "このゲームではオフです。",
+      "waiting": "キャプチャ対象のゲームを待っています。",
+      "blocked": "別のインジェクターが動作中です。",
+      "attaching": "ゲームの動作を設定中…",
+      "active": "フックが動作中です。",
+      "error": "フックを適用できませんでした。"
+    },
+    "reason": {
+      "unsupported": "Windows のみ対応しています。",
+      "missingBuild": "バックグラウンド動作用のヘルパーがビルドまたはインストールされていません。",
+      "noCapture": "OBS でゲームのウィンドウキャプチャを選択してください。",
+      "notRunning": "キャプチャ対象のゲームが起動していません。",
+      "ambiguous": "複数のゲームウィンドウが一致します。キャプチャ対象を絞り込んでください。",
+      "specialK": "Special K が読み込まれています。GSM のフックを試す前に、Special K なしでゲームを再起動してください。"
+    }
+  },
   "home": {
+    "workspace": {
+      "library": "ゲーム一覧",
+      "savedGames": "保存済みのゲーム",
+      "searchGames": "ゲームを検索",
+      "noMatchingGames": "一致するゲームがありません。",
+      "noGames": "まだゲームが追加されていません。",
+      "emptyGameHint": "最初のゲームを追加してキャプチャを設定し、マイニングを始めましょう。",
+      "addingGame": "キャプチャを設定中…",
+      "addGameError": "キャプチャを設定できませんでした。OBSの接続を確認して、もう一度お試しください。",
+      "chooseGame": "ゲームを選択",
+      "chooseGameHint": "保存済みのゲームを選ぶか、新しいキャプチャを追加してください。",
+      "gameContext": "ゲームキャプチャ",
+      "gameOptions": "ゲームの設定",
+      "gameActions": "{name}の操作",
+      "gameActionError": "ゲームを更新できませんでした。もう一度お試しください。",
+      "backToGame": "ゲームに戻る",
+      "textFeed": "テキストフィード",
+      "textFeedHint": "取得したテキストを読んで、テキストフィードから例文を収集できます。",
+      "firstGameHint": "ゲームを起動し、下の一覧からウィンドウを選んでキャプチャを設定してください。",
+      "addGame": "ゲームを追加",
+      "addGameHint": "別のウィンドウ、画面、キャプチャカードを追加します。",
+      "overlayHint": "プレイしながら単語を調べて例文を収集できます。",
+      "connections": "接続状況"
+    },
     "status": {
       "title": "ステータス",
       "gsm": "GSM",
@@ -57,8 +110,11 @@
       "preview": "プレビュー",
       "captureCardPrefix": "キャプチャカード: {title}",
       "setupNewScene": "新しいゲームキャプチャを設定:",
-      "refreshWindows": "ウィンドウを更新",
-      "selectWindow": "ウィンドウを選択",
+      "refreshWindows": "キャプチャ対象を更新",
+      "selectWindow": "キャプチャ対象を選択",
+      "captureTargetLabel": "キャプチャ対象:",
+      "sectionMonitors": "モニターキャプチャ",
+      "monitorCaptureTooltip": "選択したモニター全体と、既定の出力デバイスのデスクトップ音声をキャプチャします。このシーン専用の音声ソースを追加します。グローバルのデスクトップ音声設定と自動シーン切り替えは変更されません。",
       "setupCapture": "キャプチャを設定",
       "setupCaptureTooltip": "キャプチャ設定は、選択したWindow CaptureまたはGame Captureをウィンドウに追加し、キャプチャカードやカメラにはVideo Capture Deviceを追加します。\nフルスクリーンゲームにはGame Captureを使い、Game Captureが黒画面になる場合はWindow Captureを使ってください。\nLinux X11/Steam DeckではXComposite Window Captureを使用します。WaylandではOBSのScreen Capture (PipeWire)を使用し、システムの画面/ウィンドウ選択画面を開きます。\nキャプチャカードのゲームキャプチャはウィンドウタイトルによる自動切替なしで作成されます。",
       "waylandPipewireOption": "Wayland画面キャプチャ（PipeWire）",
@@ -88,7 +144,11 @@
       "statusStopped": "停止中",
       "guide": "設定ガイド",
       "runOnStartup": "起動時に実行",
-      "runOnStartupTooltip": "GSM起動時にGSMオーバーレイを自動的に起動します。"
+      "runOnStartupTooltip": "GSM起動時にオーバーレイを起動し、そのまま実行し続けます。ゲームに合わせて自動起動・終了するには「ゲームに合わせて開く・閉じる」を使用してください。一方を有効にすると、もう一方は無効になります。",
+      "runWithActiveGame": "ゲームに合わせて開く・閉じる",
+      "runWithActiveGameTooltip": "すべてのゲームで、キャプチャまたはゲームウィンドウを検出するとオーバーレイを開き、セッション終了時に閉じます。一時的な検出の途切れ、Alt+Tab、最小化では閉じません。有効にすると「起動時に実行」は無効になります。",
+      "recommended": "推奨",
+      "settingsError": "オーバーレイ設定を読み込みまたは保存できませんでした。ホームを開き直して再試行してください。"
     },
     "actions": {
       "title": "ユーティリティ",
@@ -105,7 +165,7 @@
     },
     "support": {
       "text": "GSMを支援する",
-      "githubSponsors": "GitHub Sponsors",
+      "githubSponsors": "GitHub Sponsors（推奨）",
       "kofi": "Ko-fi",
       "githubStar": "GitHubでスターを付ける（無料）"
     },
@@ -148,14 +208,28 @@
       "github": "GitHub",
       "discord": "Discord"
     },
+    "update": {
+      "available": "更新があります",
+      "previewDescription": "最新のオンラインリリースノートを使った開発用プレビューです。インストールは無効になっています。",
+      "availableVersion": "更新があります: {version}",
+      "title": "{version} に更新",
+      "restartDescription": "更新をダウンロードし、GSM を再起動してインストールします。",
+      "install": "更新して再起動",
+      "notNow": "今はしない",
+      "installing": "更新中…",
+      "installingDescription": "更新をダウンロードしています。準備ができると GSM が再起動します。",
+      "installFailed": "更新をインストールできませんでした。再試行するか、「今はしない」を選択してください。",
+      "notesUnavailable": "リリースノートを読み込めませんでした。再試行するか、このまま更新をインストールできます。",
+      "changed": "利用可能な更新が変わりました。この画面を閉じて開き直し、最新のリリースを確認してください。"
+    },
     "stats": {
       "loading": "GSM統計の読み込みを待機中..."
     },
     "console": {
       "openLogsFolder": "ログフォルダを開く",
       "openLogsFolderTooltip": "ログフォルダを開く",
-      "exportLogs": "ログをエクスポート",
-      "exportLogsTooltip": "ログをzipアーカイブにエクスポート",
+      "exportLogs": "匿名化したログをエクスポート",
+      "exportLogsTooltip": "検出されたユーザー名、ホームパス、コンピューター名、メール・IPアドレス、一般的な認証情報を伏せたZIPを出力します。元のログは変更されません。共有前に内容を確認してください。",
       "modeSimple": "モード: シンプル",
       "modeAdvanced": "モード: 詳細",
       "modeSimpleTooltip": "詳細ログに切替（基本＋バックグラウンドログを表示）",
@@ -269,16 +343,16 @@
     }
   },
   "captureWizard": {
-    "title": "テキストキャプチャウィザード (WIP)",
-    "subtitle": "このゲームのテキスト入力、OCRフォールバック、自動化を仕上げます。",
+    "title": "テキストキャプチャウィザード",
+    "subtitle": "4つのステップでテキストの取得方法を確認できます。必要な設定に直接移動することもできます。",
     "breadcrumbLabel": "テキストキャプチャ設定のステップ",
     "steps": {
-      "preview": "プレビュー",
+      "preview": "キャプチャ",
       "agent": "Agent",
-      "hook": "フック",
+      "hook": "テキストフック",
       "ocr": "OCR",
       "profile": "プロファイル",
-      "finish": "確認"
+      "finish": "仕上げ"
     },
     "actions": {
       "deny": "今はしない",
@@ -287,8 +361,8 @@
       "next": "次へ"
     },
     "preview": {
-      "title": "OBSプレビューを確認",
-      "description": "GSMは毎秒プレビューを更新し、各スクリーンショットの前にソースをOBSキャンバスへ合わせます。",
+      "title": "ゲームのキャプチャを確認",
+      "description": "GSMは映像キャプチャをスクリーンショット、クリップ、OCRに使用します。下のプレビューにゲームが映っているか確認してください。画面が黒い場合は、キャプチャの種類を切り替えてみてください。",
       "scene": "シーン",
       "executable": "実行ファイル",
       "captureType": "キャプチャ種類",
@@ -322,16 +396,16 @@
       "useScript": "選択したスクリプトを使う"
     },
     "hook": {
-      "title": "LunaまたはTextractorを試す",
-      "description": "Luna/Textractorのフックは主にビジュアルノベル向けです。一般的なゲームではAgentスクリプトかOCRの方が動作しやすいため、ここではきれいな会話テキストが見えるフックだけを選んでください。",
+      "title": "ゲームからテキストを直接取得",
+      "description": "テキストフックはゲームから直接テキストを取得するため、OCRの認識ミスを避けられます。ビジュアルノベルには、通常LunaやTextractorが最適です。",
       "engine": "エンジン",
       "luna": "Luna Hook",
       "textractor": "Textractor",
       "start": "フックエンジンを開始",
       "running": "使用可能なフック {count} 件",
       "notRunning": "フックエンジンは実行されていません。",
-      "waiting": "テキスト付きフックを待機中です。ゲームの会話を進めてください。",
-      "startFirst": "エンジンを開始してフックをスキャンしてください。",
+      "waiting": "ゲームの会話を進めてテキストを取得してください。一致するテキストが表示されない場合は、Textractorを試すかOCRに進んでください。",
+      "startFirst": "まずLunaを起動し、ゲームの会話を進めて、画面と一致するテキストを選択してください。",
       "noPreview": "テキストプレビューはまだありません",
       "refreshFailed": "フックの更新に失敗しました。",
       "startFailed": "フックエンジンの起動に失敗しました。",
@@ -340,7 +414,7 @@
     },
     "ocr": {
       "title": "OCR範囲を選択",
-      "description": "ゲームの会話を囲む範囲を描画してください。選択画面を閉じると、GSMが一度スキャンして認識したテキストを表示します。",
+      "description": "OCRはゲームの映像から文字を読み取ります。キャプチャカード経由のゲームを含め、多くのゲームで使えます。会話の範囲を選択して、テキストのサンプルを確認してください。",
       "reasonStable": "OCRエリアを指定すると会話ボックスだけにスキャンを絞れます。",
       "reasonNoise": "小さい範囲はメニュー、名前欄、UIノイズを避けやすくします。",
       "reasonFallback": "コンソールゲーム、保護されたエンジン、キャプチャカードでも動作します。",
@@ -367,8 +441,8 @@
       "automationAutoDescription": "ゲームがアクティブな間、選択範囲を継続的にスキャンします。"
     },
     "profile": {
-      "title": "このゲーム設定を保存",
-      "description": "このOBSシーンの自動化を保存し、必要ならGSMプロファイルでより大きなゲーム別設定に分けられます。",
+      "title": "このゲームの設定を仕上げる",
+      "description": "テキストソースを確認し、次回から自動起動するものを選んでください。",
       "source": "テキストソース",
       "sourceAgent": "Agentスクリプト",
       "sourceLuna": "Luna Hook",
@@ -381,7 +455,7 @@
       "ocrNone": "OCRなし",
       "ocrManual": "手動OCR",
       "ocrAuto": "自動OCR",
-      "launchOverlay": "このゲームでオーバーレイを起動",
+      "launchOverlay": "このゲームに合わせてオーバーレイを開く・閉じる",
       "openProfiles": "プロファイルを開く",
       "assignLabel": "このシーンをGSMプロファイルに割り当てる",
       "assignHint": "シーン「{scene}」がアクティブになると、GSMは自動的にこのプロファイルに切り替えます。",
@@ -408,6 +482,38 @@
     },
     "errors": {
       "contextFailed": "アクティブキャプチャの読み込みに失敗しました。"
+    },
+    "guided": {
+      "captureNext": "キャプチャを確認してテキスト選択へ",
+      "hookNext": "OCRへ進む",
+      "finalize": "仕上げへ進む",
+      "saveAndClose": "保存して閉じる",
+      "skipOcr": "OCRをスキップして仕上げる",
+      "ocrOptional": "テキストフックを選択済みです。OCRをスキップするか、フックで取得できないテキスト用に設定できます。",
+      "ocrGuide": "会話の範囲を選択し、サンプルを確認して、OCRを実行するタイミングを選んでください。",
+      "hookGuide": "1. エンジンを起動します。2. ゲームの会話を進めます。3. 画面と一致するテキストを選択します。",
+      "vnTitle": "Luna / Textractor · ビジュアルノベルにおすすめ",
+      "agentTitle": "Agent · ゲーム専用スクリプト",
+      "agentDescription": "Agentは特定のゲーム用に作成されたスクリプトを使用します。必要なスクリプトがわかっている場合は、手動で検索できます。",
+      "agentRecommended": "一致度の高いスクリプト",
+      "agentMatchHint": "このゲームのシーン名、ウィンドウタイトル、実行ファイルをもとに見つかった候補です。使用前にゲームとプラットフォームを確認してください。",
+      "agentNoMatch": "一致度の高いスクリプトは見つかりませんでした。ビジュアルノベルならLuna / Textractorを試すか、OCRに進んでください。",
+      "useAgent": "このスクリプトを使う",
+      "stopHook": "エンジンを停止",
+      "stoppingFailed": "テキストフックの停止に失敗しました。",
+      "selectedSource": "選択中: {source}",
+      "noSource": "テキストソースが未選択です。テキストフックまたはOCRに戻って設定するか、キャプチャ設定のみ保存できます。",
+      "optionalSettings": "その他の設定: オーバーレイとGSMプロファイル",
+      "noScene": "ゲームを起動し、ホームでそのゲームのキャプチャを選択してから更新してください。",
+      "useOcr": "OCRを使って仕上げる",
+      "keepHook": "テキストフックを使って仕上げる",
+      "engineBusy": "起動中…",
+      "hookSelected": "テキストフックを選択しました。補助としてOCRを設定するか、仕上げに進めます。",
+      "ocrNotTested": "サンプルはまだありません。今すぐ範囲を選択するか、既存のOCR設定を使えます。",
+      "agentStart": "スクリプトを起動",
+      "agentRunning": "Agentは実行中です。会話を進めて取得したテキストを確認してください。",
+      "usingSaved": "保存済みの設定を読み込みました。変更したいステップに移動できます。",
+      "otherGameRunning": "{exe} のテキストフックが実行中です。このゲーム用のフックを起動する前に停止してください。"
     }
   },
   "install": {
@@ -472,6 +578,31 @@
     }
   },
   "settings": {
+    "workspace": {
+      "brandHint": "設定とツール",
+      "general": "一般",
+      "generalHelp": "外観、言語、起動時の動作を設定します。",
+      "layout": "タブとウィンドウ",
+      "layoutHelp": "表示するタブやゲームウィンドウとの連携を設定します。",
+      "updatesHelp": "デスクトップアプリとバックエンドの更新を管理します。",
+      "backupsHelp": "データベースの自動バックアップや選択したデータのバックアップを作成します。",
+      "storageHelp": "設定、データベース、ダウンロード済みツールの保存先を管理します。",
+      "appearance": "外観",
+      "behavior": "起動と動作",
+      "moreSettings": "GSMとオーバーレイの設定",
+      "autoSave": "デスクトップ設定は自動保存されます。",
+      "searchPlaceholder": "すべての設定を検索…",
+      "searchResults": "検索結果",
+      "clearSearch": "検索をクリア",
+      "openSection": "設定を開く",
+      "navigation": "設定のセクション",
+      "selectiveBackup": "選択した項目のバックアップと復元",
+      "statsOverview": "概要",
+      "statsReading": "読書統計",
+      "statsGoals": "目標",
+      "statsAnki": "Anki統計",
+      "statsSearch": "検索"
+    },
     "hub": {
       "findSetting": "設定を探す",
       "findDescription": "変更したい内容を検索すると、GSMが適切な設定画面を開きます。",
@@ -499,7 +630,6 @@
       "iconRandomTray": "ランダム（トレイアイコンも）",
       "language": "言語:",
       "startMinimized": "コンソール最小化で起動:",
-      "showYuzuLauncher": "Yuzuランチャーを表示:",
       "runTransparencyOnStartup": "起動時に透過ツールを実行:",
       "runOverlayOnStartup": "起動時にオーバーレイを実行:",
       "quitOnWindowClose": "ウィンドウを閉じたときにGSMを終了:",
@@ -609,6 +739,10 @@
     },
     "dataFolder": {
       "title": "データフォルダー",
+      "intro": "GSMの設定、データベース、ログ、ダウンロードしたツールの保存先を選択します。変更するとGSMが再起動します。",
+      "database": "データベース: {path}",
+      "locationFile": "保存先の設定ファイル",
+      "locationHint": "ホームの.config/GameSentenceMinerにある小さなdata_dir.jsonファイルが保存先を記憶するため、元のAppDataフォルダーを削除しても設定が保持されます。GSMを終了してからdataDirのパスを手動で編集することもできます。古いデータを整理する際は、このファイルを残してください。",
       "description": "GSM設定、デスクトップアプリ設定、オーバーレイ設定、データベースをコピーします。Chromiumのセッション/ストレージおよびYomitanデータはコピーされません。変更前にYomitan辞書をエクスポートし、変更後にインポートしてください。元のファイルは削除されません。",
       "current": "現在のフォルダー: {path}",
       "original": "元のAppDataフォルダー: {path}",
@@ -870,7 +1004,7 @@
       "ocrNone": "なし",
       "ocrAuto": "自動OCR",
       "ocrManual": "手動OCR",
-      "launchOverlay": "ゲームと一緒にオーバーレイを起動:",
+      "launchOverlay": "ゲームに合わせてオーバーレイを開く・閉じる:",
       "noSceneHint": "自動化を設定するにはOBSゲームを選択または切り替えてください。"
     },
     "scriptPicker": {
@@ -924,7 +1058,7 @@
       "textHookLuna": "このゲームがアクティブになるとLunaTranslatorを自動起動します。",
       "launchDelay": "このゲームで選択されたテキストフックランチャーを起動する前の遅延。",
       "agentScript": "このゲームのAgentスクリプトパス。手動設定、参照、検索が可能です。",
-      "launchOverlay": "このゲームのセッションがアクティブな間GSMオーバーレイを起動し、ゲーム/セッション終了時に自動起動されたオーバーレイを閉じます。",
+      "launchOverlay": "このゲームのキャプチャまたはウィンドウを検出するとオーバーレイを開きます。キャプチャやウィンドウの消失が確認された場合、またはこの設定が無効なOBSシーンに切り替えた場合に閉じます。Alt+Tabや最小化では終了しません。ホーム → オーバーレイ → ゲームに合わせて開く・閉じるを有効にすると、すべてのゲームに適用されます。ホームのその設定または「起動時に実行」が有効な間は変更できませんが、ゲームごとの設定は保持されます。",
       "browseScript": "ファイルピッカーを開いてこのゲームのAgentスクリプトを選択します。",
       "searchScript": "Agentスクリプトパス下のすべてのスクリプトを検索し、ゲームとの類似度でランク付けします。",
       "downloadAgent": "公式GitHubリリースから最新のAgentをダウンロードします。インストールフォルダを選択してください。",
@@ -937,10 +1071,66 @@
       "status": "ゲーム自動化アクションからの最新の保存/検出ステータス。",
       "candidatePicker": "このゲームに最も一致するAgentスクリプト候補を選択します。",
       "noScene": "ゲームプロファイルが読み込まれていません。まずゲームを選択してください。"
+    },
+    "workspace": {
+      "brand": "自動化",
+      "tagline": "ゲームとシーンの動作",
+      "sharedTitle": "共通設定",
+      "allScenes": "すべてのシーン",
+      "sceneHint": "設定する OBS シーンを選択してください。",
+      "sceneDescription": "この OBS シーンがアクティブになったときの動作を設定します。",
+      "sharedDescription": "すべてのゲームプロファイルに適用する OCR の上書き設定です。",
+      "autosave": "自動保存",
+      "ocrNoneHint": "このシーンでは OCR を起動しません。",
+      "ocrAutoHint": "ゲームテキストを継続的に取得します。",
+      "ocrManualHint": "OCR ホットキーでテキストを取得します。",
+      "overlayHint": "このシーンがアクティブになるとオーバーレイを開きます。",
+      "overlayManaged": "ホームのオーバーレイ設定で管理されています。",
+      "sceneTitle": "シーンの自動化",
+      "manualOcrHint": "自動 OCR を使わないプロファイルでも手動 OCR を利用できるようにします。",
+      "ignoreSceneHint": "OBS シーンを切り替えても OCR を継続します。"
     }
   },
   "ocr": {
+    "workspace": {
+      "recognition": "認識",
+      "filtering": "画像と出力",
+      "comparison": "テキスト比較",
+      "shortcuts": "ショートカット",
+      "tools": "ツール",
+      "navigation": "OCRビュー",
+      "scanSettings": "スキャン設定",
+      "imageSettings": "画像設定",
+      "quickCapture": "クイックキャプチャ",
+      "quickCaptureHint": "ショートカットまたは操作ボタンでスキャンします。",
+      "startToCapture": "OCRを開始するとキャプチャできます。",
+      "textOutput": "テキスト出力",
+      "copyText": "コピー",
+      "lineBreaks": "改行を保持",
+      "copyMode": "{mode}のテキストをコピー",
+      "lineBreaksMode": "{mode}の改行を保持",
+      "areaTools": "エリアツールとガイド",
+      "singlePassSummary": "{engine} · {rate}秒間隔",
+      "twoPassSummary": "{stability} → {engine} · {rate}秒間隔",
+      "comparisonPrimary": "基本しきい値",
+      "comparisonTruncation": "切り詰め判定",
+      "comparisonSubset": "部分一致とブロック",
+      "resetDefaults": "初期値に戻す",
+      "toolsDiagnostics": "診断とランタイム",
+      "toolsPackages": "パッケージ",
+      "toolsFiles": "設定ファイル",
+      "consoleExpand": "コンソールを拡大",
+      "consoleCompact": "コンソールを縮小",
+      "consoleDockRight": "左右分割",
+      "consoleDockBottom": "下部ドック",
+      "pipelineCapture": "キャプチャ",
+      "pipelineStability": "パス1 · 安定判定",
+      "pipelineMain": "メインOCR",
+      "pipelineCadence": "間隔"
+    },
     "sceneAndAreas": {
+      "autostart": "OCRの自動起動:",
+      "autostartHint": "このゲームがアクティブなときに自動起動するOCRモードを選択します。この設定はゲーム自動化と共通です。",
       "title": "ゲームとエリア",
       "areaCount": "{count} エリア",
       "areaCountPlural": "{count} エリア",
@@ -959,6 +1149,8 @@
       "advanced": "詳細",
       "scanRate": "スキャンレート（秒）:",
       "scanSpeed": "スキャン速度:",
+      "onlineScans": "オンラインスキャンで認識精度を高める",
+      "onlineScansHelp": "オフ：ScreenAIでローカルに文字を認識します。オン：キャプチャした文字領域をGoogle Lensに送信し、認識精度の向上を図ります。インターネット接続が必要です。VPN、地域、接続状況によってはスキャンが遅くなる場合があります。",
       "language": "言語:",
       "scanImageQuality": "スキャン画像品質",
       "furiganaFilter": "ふりがなフィルター",
@@ -987,23 +1179,74 @@
     "comparison": {
       "title": "テキスト比較チューニング",
       "expertTitle": "エキスパートヒューリスティクス",
-      "duplicateThreshold": { "label": "重複一致閾値 (%)", "title": "値が高いほど厳密です。異なる行が重複として扱われる場合はこの値を上げてください。" },
-      "changeThreshold": { "label": "テキスト変更閾値 (%)", "title": "値が低いほど部分的な変更で早くOCR2をトリガーします。値が高いほどより明確な変更を待ちます。" },
-      "evolvingPrefix": { "label": "進行中プレフィックス一致 (%)", "title": "短い行がより長い行の先頭のように見えるかチェックする際に使用されます。" },
-      "truncationFallbackMin": { "label": "切り詰めフォールバック最小閾値 (%)", "title": "プレフィックスまたはサフィックスの切り詰め一致が許可される前に必要な最小比較閾値。" },
-      "truncationStrictMin": { "label": "切り詰め厳密閾値 (%)", "title": "この閾値を超えると、GSMは切り詰めを同じテキストとして扱う前により強いベース類似度も要求します。" },
-      "truncationMargin": { "label": "切り詰めベースマージン", "title": "切り詰めフォールバックが拒否される前にベース類似度が比較閾値をどこまで下回ることができるか。" },
-      "truncationMinLength": { "label": "切り詰め最小長（文字）", "title": "切り詰め一致に許可される最短の正規化文字列長。" },
-      "truncationMinRatio": { "label": "切り詰め最小長比率 (%)", "title": "切り詰め一致が考慮される前に短い行が長い行をカバーする必要がある量。" },
-      "subsetChunkMinLength": { "label": "サブセットチャンク最小長（文字）", "title": "これより短い受信OCRチャンクは、完全一致でない限りチャンクカバレッジフォールバックをスキップします。" },
-      "shortChunkLimit": { "label": "短チャンク制限（文字）", "title": "この長さ以下のチャンクはより小さな一致ブロック最小値を使用します。" },
-      "shortChunkMinSize": { "label": "短チャンク一致最小サイズ", "title": "短チャンクに対してカウントされる最小連続一致サイズ。" },
-      "defaultMinSize": { "label": "デフォルト一致最小サイズ", "title": "長いチャンクに対してカウントされる最小連続一致サイズ。" },
-      "coverageFloor": { "label": "サブセットカバレッジ下限 (%)", "title": "重複排除フォールバックに許可される最低チャンクカバレッジ要件。" },
-      "coverageCeiling": { "label": "サブセットカバレッジ上限 (%)", "title": "重複排除フォールバックに許可される最高チャンクカバレッジ要件。" },
-      "coverageOffset": { "label": "カバレッジ閾値オフセット", "title": "現在の比較閾値をカバレッジ要件に変換する前に適用されるオフセット。" },
-      "longestBlockMin": { "label": "最長ブロック最小（文字）", "title": "サブセットカバレッジモードで要求される最小連続ブロックサイズ。" },
-      "longestBlockDivisor": { "label": "最長ブロック除数", "title": "値が大きいほど長いチャンクに必要な連続ブロック長が減少します。" }
+      "duplicateThreshold": {
+        "label": "重複一致閾値 (%)",
+        "title": "値が高いほど厳密です。異なる行が重複として扱われる場合はこの値を上げてください。"
+      },
+      "changeThreshold": {
+        "label": "テキスト変更閾値 (%)",
+        "title": "値が低いほど部分的な変更で早くOCR2をトリガーします。値が高いほどより明確な変更を待ちます。"
+      },
+      "evolvingPrefix": {
+        "label": "進行中プレフィックス一致 (%)",
+        "title": "短い行がより長い行の先頭のように見えるかチェックする際に使用されます。"
+      },
+      "truncationFallbackMin": {
+        "label": "切り詰めフォールバック最小閾値 (%)",
+        "title": "プレフィックスまたはサフィックスの切り詰め一致が許可される前に必要な最小比較閾値。"
+      },
+      "truncationStrictMin": {
+        "label": "切り詰め厳密閾値 (%)",
+        "title": "この閾値を超えると、GSMは切り詰めを同じテキストとして扱う前により強いベース類似度も要求します。"
+      },
+      "truncationMargin": {
+        "label": "切り詰めベースマージン",
+        "title": "切り詰めフォールバックが拒否される前にベース類似度が比較閾値をどこまで下回ることができるか。"
+      },
+      "truncationMinLength": {
+        "label": "切り詰め最小長（文字）",
+        "title": "切り詰め一致に許可される最短の正規化文字列長。"
+      },
+      "truncationMinRatio": {
+        "label": "切り詰め最小長比率 (%)",
+        "title": "切り詰め一致が考慮される前に短い行が長い行をカバーする必要がある量。"
+      },
+      "subsetChunkMinLength": {
+        "label": "サブセットチャンク最小長（文字）",
+        "title": "これより短い受信OCRチャンクは、完全一致でない限りチャンクカバレッジフォールバックをスキップします。"
+      },
+      "shortChunkLimit": {
+        "label": "短チャンク制限（文字）",
+        "title": "この長さ以下のチャンクはより小さな一致ブロック最小値を使用します。"
+      },
+      "shortChunkMinSize": {
+        "label": "短チャンク一致最小サイズ",
+        "title": "短チャンクに対してカウントされる最小連続一致サイズ。"
+      },
+      "defaultMinSize": {
+        "label": "デフォルト一致最小サイズ",
+        "title": "長いチャンクに対してカウントされる最小連続一致サイズ。"
+      },
+      "coverageFloor": {
+        "label": "サブセットカバレッジ下限 (%)",
+        "title": "重複排除フォールバックに許可される最低チャンクカバレッジ要件。"
+      },
+      "coverageCeiling": {
+        "label": "サブセットカバレッジ上限 (%)",
+        "title": "重複排除フォールバックに許可される最高チャンクカバレッジ要件。"
+      },
+      "coverageOffset": {
+        "label": "カバレッジ閾値オフセット",
+        "title": "現在の比較閾値をカバレッジ要件に変換する前に適用されるオフセット。"
+      },
+      "longestBlockMin": {
+        "label": "最長ブロック最小（文字）",
+        "title": "サブセットカバレッジモードで要求される最小連続ブロックサイズ。"
+      },
+      "longestBlockDivisor": {
+        "label": "最長ブロック除数",
+        "title": "値が大きいほど長いチャンクに必要な連続ブロック長が減少します。"
+      }
     },
     "hotkeys": {
       "title": "ホットキー",
@@ -1012,6 +1255,7 @@
       "manual": "手動（緑のエリア）",
       "menu": "メニュー（紫のエリア）",
       "areaSelect": "エリア選択",
+      "addArea": "新しいエリアを追加",
       "wholeWindow": "ウィンドウ全体",
       "pause": "一時停止",
       "keyboard": "キーボード",
@@ -1121,6 +1365,7 @@
       "manualDelayGamepadOnly": "緑のエリアの手動スキャン遅延を、ゲームパッドから実行した場合にのみ適用します。",
       "menuHotkey": "設定された紫のメニューエリアでメインOCR（OCR 2）を1回実行します。Escapeでクリアします。",
       "areaSelectHotkey": "押すと一時的なエリアを選択して1回だけOCRします。メニューに便利です。Escapeでクリアします。",
+      "addAreaHotkey": "新しいエリアを1つ描画すると保存され、実行中のOCRに適用されます。既存のエリアは保持されます。自動キャプチャには「Normal」、メニューホットキー用には「Secondary」を選択してください。この入力欄でEscapeを押すと割り当てを解除します。",
       "wholeWindowHotkey": "アクティブなOCRソース全体（通常はOBSのゲームソース）を1回OCRし、エリア矩形をバイパスします。Escapeでクリアします。",
       "pauseHotkey": "OCRスキャン全体を一時停止または再開します。カットシーン中やOCRを一時的に止めたいときに便利です。Escapeでクリアします。",
       "processPriority": "WindowsでOCR Pythonプロセスの優先度を設定します。高い値はOCRの応答性を改善する場合がありますが、システムの応答性を下げることがあります。",
@@ -1145,6 +1390,8 @@
       "comparison": "テキストが新規、安定、または前の行の一部かを判定する重複除去と変更検出のしきい値です。"
     },
     "runtime": {
+      "failedLoadAutostart": "OCRの自動起動設定を読み込めませんでした。",
+      "failedSaveAutostart": "OCRの自動起動設定を保存できませんでした。",
       "idle": "アイドル",
       "startingAuto": "自動OCRを起動中...",
       "startingManual": "手動OCRを起動中...",
@@ -1231,6 +1478,84 @@
       "importFailed": "インポートに失敗しました。",
       "areaConfigExported": "OCRエリア設定をクリップボードにコピーしました。",
       "exportFailed": "エクスポートに失敗しました。"
+    },
+    "desk": {
+      "preview": {
+        "live": "ライブプレビュー",
+        "paused": "プレビューを一時停止中",
+        "loading": "ゲームのプレビューを読み込み中…",
+        "unavailable": "プレビューを取得できません · 保存済みの範囲を表示",
+        "stale": "プレビューを取得できません · 最後の画像を表示",
+        "textBoxes": "テキスト枠",
+        "pause": "プレビューを停止",
+        "resume": "プレビューを再開",
+        "detected": "テキスト枠 {count} 個 · 最新の読み取り",
+        "waiting": "OCR の読み取りを待機中",
+        "startHint": "OCR を開始するとテキスト枠が表示されます"
+      },
+      "brandHint": "ゲームのテキストを取得",
+      "workspace": "OCR ワークスペース",
+      "capture": "キャプチャ",
+      "textMatching": "テキスト比較",
+      "captureAreas": "キャプチャ範囲",
+      "editAreas": "範囲を編集",
+      "thisSession": "現在のセッション",
+      "engine": "文字認識",
+      "stability": "変化の検出",
+      "adjustRecognition": "認識設定を変更",
+      "editShortcuts": "ショートカットを編集",
+      "unbound": "未割り当て",
+      "autoMode": "自動キャプチャ",
+      "manualMode": "手動キャプチャ",
+      "settingsSaved": "変更は自動で保存されます",
+      "closeConsole": "ワークスペースに戻る",
+      "layoutOverview": "保存済みの配置",
+      "wholeWindow": "ウィンドウ全体",
+      "wholeWindowHint": "読み取りたいテキストの範囲を指定してください。",
+      "savedLayout": "範囲は保存されています",
+      "savedLayoutHint": "範囲選択画面で配置を確認できます。",
+      "areaKinds": {
+        "normal": "テキスト",
+        "secondary": "メニュー",
+        "excluded": "除外",
+        "black-hole": "ブラックホール",
+        "exclusive": "専用"
+      },
+      "viewHelp": {
+        "capture": "キャプチャ範囲、セッション設定、単発の読み取り。",
+        "recognition": "テキストの検出方法と認識方法を設定します。",
+        "filtering": "画像を補正し、テキストの出力方法を設定します。",
+        "comparison": "新しいテキスト、安定したテキスト、重複の判定を調整します。",
+        "shortcuts": "ゲームを離れずにテキストを取得できます。",
+        "tools": "OCR パッケージ、診断、設定ファイルを管理します。",
+        "console": "OCR の出力と診断ログ。他のページを使用中もログは保持されます。"
+      },
+      "shortcutHelp": "入力欄を選択してキーの組み合わせを押してください。Escape で解除できます。",
+      "openAreaSelector": "範囲選択ツールを開く",
+      "editor": {
+        "edit": "プレビューで範囲を編集",
+        "areaType": "描画する範囲",
+        "undo": "元に戻す",
+        "clear": "すべて消去",
+        "selectedArea": "選択中の範囲",
+        "none": "なし",
+        "areaLabel": "{number} · {kind}",
+        "remove": "削除",
+        "cancel": "キャンセル",
+        "save": "範囲を保存",
+        "saving": "保存中…",
+        "canvas": "ゲームのプレビューにOCR範囲を描画",
+        "hint": "ドラッグで範囲を描画し、クリックで選択します。プレビューは一時停止中です。保存すると変更が適用されます。",
+        "legacyHint": "この古い形式または未対応の配置は「範囲選択ツールを開く」から編集してください。",
+        "errors": {
+          "sceneChanged": "シーンが変わりました。キャンセルして現在のシーンで編集を開き直してください。",
+          "conflict": "保存済みの範囲が別の場所で変更されました。キャンセルしてシーンを再読み込みしてください。",
+          "invalid": "この配置はここでは保存できません。範囲選択ツールを使用してください。",
+          "failed": "範囲を保存できませんでした。変更内容は保持されています。もう一度お試しください。"
+        },
+        "keyboardModifiers": "修飾キーで選択",
+        "modifierHint": "Shift: 除外 · Ctrl: メニュー · Alt: 専用 · Ctrl+Alt: ブラックホール"
+      }
     }
   },
   "sceneSwitcher": {
@@ -1274,6 +1599,23 @@
     "cancel": "キャンセル"
   },
   "speechRecognition": {
+    "workspace": {
+      "title": "Windows音声",
+      "brandHint": "音声認識",
+      "capture": "ライブ文字起こし",
+      "captureHelp": "選択したOBSシーンのゲームから音声のセリフを取得します。",
+      "advanced": "詳細設定",
+      "activity": "動作ログ",
+      "navigation": "Windows音声のビュー",
+      "session": "音声認識セッション",
+      "unsaved": "未保存の変更",
+      "transcript": "認識されたセリフ",
+      "clearText": "テキストを消去",
+      "interim": "認識中…",
+      "waiting": "ゲームの音声を待っています…",
+      "empty": "音声認識を開始すると、ここにセリフが表示されます。",
+      "forwarding": "認識されたセリフにはGSMのテキスト処理ルールが適用されます。"
+    },
     "title": "Windows音声認識",
     "subtitle": "現在のOBSシーンで音声認識を実行し、認識した台詞をGSMのテキスト処理へ送ります。",
     "experimental": "試験的機能・Windows専用",
@@ -1336,9 +1678,79 @@
     }
   },
   "textProcessing": {
-    "previewFailed": "プレビューを生成できませんでした"
+    "previewFailed": "プレビューを生成できませんでした",
+    "workspace": {
+      "eyebrow": "取得したテキスト",
+      "description": "取得したテキストを整え、編集しながら結果を確認できます。",
+      "unsaved": "未保存の変更",
+      "saved": "保存済み",
+      "enabledCount": "{total} 件中 {count} 件が有効",
+      "live": "ライブ",
+      "sample": "サンプル",
+      "previewHint": "未保存の変更を含む現在のルールでプレビューします。",
+      "followLatest": "最新のゲームテキストに追従"
+    },
+    "rules": {
+      "mode": "ルールの種類"
+    }
   },
   "texthook": {
+    "workspace": {
+      "title": "テキストフック",
+      "brandHint": "ゲームから直接取得",
+      "currentGame": "現在のゲーム",
+      "navigation": "テキストフックのビュー",
+      "live": "ライブテキスト",
+      "liveHelp": "フックを選び、出力がゲームのセリフと一致するか確認します。",
+      "engine": "エンジンとスクリプト",
+      "output": "出力とタイミング",
+      "outputHelp": "テキストの出力方法、修正の待機時間、最大文字数を調整します。",
+      "tools": "ツール",
+      "toolsHelp": "テキストフックの説明とインストール済みエンジンの管理。",
+      "noHookSelected": "フック未選択",
+      "logHelp": "このセッションのフックエンジンからのメッセージ。",
+      "closeLog": "ワークスペースに戻る",
+      "clearLog": "ログを消去"
+    },
+    "updates": {
+      "title": "LunaHook と Textractor",
+      "description": "新しいビルドをバックグラウンドでダウンロードし、テキストフックの停止中に適用します。両方のエンジンをまとめて更新します。",
+      "settings": "エンジン設定",
+      "automatic": "自動更新する",
+      "automaticOn": "自動更新オン",
+      "automaticOff": "自動更新オフ",
+      "versionChoice": "エンジンパッケージのバージョン",
+      "installSelected": "選択したバージョンをインストール",
+      "updateLatest": "最新版に更新",
+      "recommended": "推奨",
+      "latest": "最新",
+      "pinHint": "両エンジンをまとめて更新・ダウングレードできます。バージョンを選んでインストールすると自動更新はオフになり、再度変更するか自動更新を有効にするまで選択が維持されます。",
+      "buildVersions": "LunaHook {luna} · Textractor {textractor}",
+      "verificationHint": "すべてのファイルを検証してからパッケージを切り替えます。以前のパッケージは保持されます。",
+      "repair": "修復／再インストール",
+      "updateNow": "今すぐ更新",
+      "install": "エンジンをインストール",
+      "verifying": "ダウンロードしたファイルを検証中…",
+      "installing": "検証済みの更新をインストール中…",
+      "waiting": "更新を検証済みです。実行中のフックが停止したら適用します。",
+      "failed": "エンジンの更新に失敗しました。再確認または再インストールで再試行してください。",
+      "preferenceFailed": "自動更新の設定を保存できませんでした。",
+      "installed": "インストール済みパッケージ: {version}",
+      "available": "配布中のパッケージ: {version}",
+      "unknownVersion": "バージョン不明",
+      "notInstalled": "エンジンがインストールされていないか、修復が必要です。",
+      "check": "今すぐ確認",
+      "checking": "エンジンの更新を確認中…",
+      "checkFailed": "エンジンの更新を確認できませんでした。もう一度お試しください。",
+      "updateAvailable": "エンジンの更新があります。",
+      "upToDate": "エンジンパッケージは最新です。",
+      "download": "エンジンをダウンロード／更新",
+      "downloading": "エンジンをダウンロード中…",
+      "downloadFailed": "フックエンジンをダウンロードできませんでした。もう一度お試しください。",
+      "ready": "フックエンジンの準備ができました。",
+      "stopFirst": "エンジンをダウンロードする前に、実行中のテキストフックを停止してください。",
+      "progress": "フックエンジンをダウンロード中 ({current}/{total}): {file}"
+    },
     "notice": {
       "title": "テキストフックについて",
       "description": "テキストフックは実行中のゲームからテキストを直接取得します。対応しているゲームでは、OCR よりもクリーンで正確なテキストを取得できます。",
@@ -1392,8 +1804,8 @@
       "title": "Agentスクリプト",
       "scriptPath": "スクリプトパス:",
       "scriptPlaceholder": ".js Agentスクリプトを選択",
-      "search": "検索",
-      "browse": "参照",
+      "search": "スクリプトを検索",
+      "browse": "ファイルを選択…",
       "save": "保存",
       "noScripts": "Agentスクリプトが見つかりません。",
       "pickerTitle": "Agentスクリプトを選択",
@@ -1406,8 +1818,10 @@
       "runDetachedHint": "次回GSMを開いたとき、実行中のAgentセッションに再接続します。"
     },
     "profile": {
-      "title": "保存済みプロファイル",
+      "title": "次回のために保存",
       "saved": "保存済み",
+      "recommended": "おすすめ",
+      "saveHint": "動作するフックを保存すると、次回も使えます。",
       "autoHook": "次回起動時にフックを自動アタッチ",
       "copyToClipboard": "処理済みテキストをクリップボードにコピー",
       "flushDelay": "テキスト更新ウィンドウ (ms):",
@@ -1429,11 +1843,26 @@
       "rowLabel": "フック #{id} を選択: {name}",
       "searchTitle": "フック検索",
       "waiting": "フック待機中。ゲームでテキストを表示してください。",
-      "notRunning": "「開始」を押してエンジンを開始してください。",
-      "noTextYet": "(まだテキストなし)"
+      "notRunning": "テキスト取得を開始してフックを探してください。",
+      "noTextYet": "(まだテキストなし)",
+      "rankingHint": "学習言語（{language}）に合う読みやすいテキストを優先して表示します。言語の判定は文字種による目安です。選択中のフックは常に表示されます。",
+      "readabilityHint": "読みやすいテキストを優先して表示します。選択中のフックは常に表示されます。",
+      "showNoise": "ノイズ候補を表示（{count} 件）",
+      "onlyNoise": "現在はノイズ候補のみです。ノイズ候補を表示して確認するか、ゲームのテキストを進めてください。",
+      "quality": {
+        "targetLanguage": "学習言語に近い文字種",
+        "possibleLanguage": "学習言語の可能性あり",
+        "readable": "読みやすいテキスト",
+        "mixed": "テキストとノイズが混在",
+        "paths": "パスや技術的な文字列",
+        "garbled": "文字化けの可能性",
+        "repetitive": "繰り返しが多いテキスト",
+        "symbols": "主に数字や記号"
+      }
     },
     "output": {
       "title": "選択中フックの出力",
+      "checkHint": "ゲーム内のテキストと一致しているか確認してください。",
       "waiting": "選択中フックからのテキストを待機中…",
       "selectHook": "プレビューするフックを一覧から選択してください。"
     },
@@ -1443,13 +1872,21 @@
     },
     "status": {
       "attached": "アタッチ中",
+      "starting": "起動中",
+      "waitingForText": "テキスト待機中",
+      "receiving": "テキスト受信中",
       "ready": "準備完了",
       "noTarget": "対象なし"
+    },
+    "layout": {
+      "captureOptions": "テキスト取得の詳細設定",
+      "troubleshooting": "トラブルシューティング"
     },
     "actions": {
       "start": "開始",
       "searchHooks": "フックを検索",
-      "stop": "停止"
+      "stop": "停止",
+      "preparing": "テキスト取得を準備しています…"
     },
     "dev": {
       "sendLargePayload": "ランダムな日本語ペイロードを送信 ({size} 文字)",

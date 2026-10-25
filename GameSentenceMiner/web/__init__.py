@@ -1,6 +1,3 @@
-from GameSentenceMiner.util.config.configuration import is_gsm_cloud_preview_enabled
-
-
 def register_routes() -> None:
     from GameSentenceMiner.web.texthooking_page import app
     from GameSentenceMiner.web.anki_api_endpoints import register_anki_api_endpoints
@@ -22,10 +19,12 @@ def register_routes() -> None:
         register_third_party_stats_routes,
     )
     from GameSentenceMiner.web.tadoku_api import register_tadoku_api_routes
+    from GameSentenceMiner.web.kechimochi_api import register_kechimochi_api_routes
     from GameSentenceMiner.web.tokenization_api import (
         register_tokenization_api_routes,
     )
     from GameSentenceMiner.web.yomitan_api import register_yomitan_api_routes
+    from GameSentenceMiner.web.clips_api import register_clips_api_routes
 
     register_database_api_routes(app)
     register_jiten_database_api_routes(app)
@@ -37,10 +36,11 @@ def register_routes() -> None:
     register_import_api_routes(app)
     register_third_party_stats_routes(app)
     register_tadoku_api_routes(app)
+    register_kechimochi_api_routes(app)
     register_yomitan_api_routes(app)
     register_anki_api_endpoints(app)
     register_tokenization_api_routes(app)
-    if is_gsm_cloud_preview_enabled():
-        from GameSentenceMiner.web.cloud_sync_api import register_cloud_sync_api_routes
+    register_clips_api_routes(app)
+    from GameSentenceMiner.web.cloud_sync_api import register_cloud_sync_api_routes
 
-        register_cloud_sync_api_routes(app)
+    register_cloud_sync_api_routes(app)

@@ -14,6 +14,7 @@ from GameSentenceMiner.util.config.configuration import (
 from GameSentenceMiner.util.cron import cron_scheduler
 from GameSentenceMiner.util.database.db import GameLinesTable
 from GameSentenceMiner.util.database.db import gsm_db, get_db_directory
+from GameSentenceMiner.util.tadoku_sync import TADOKU_TITLE_SOURCES
 from GameSentenceMiner.web.game_profiles import invalidate_game_profiles_cache
 
 
@@ -422,6 +423,9 @@ def deduplicate_lines_core(
 
 
 def register_database_api_routes(app):
+    from GameSentenceMiner.web.database_maintenance_api import register_database_maintenance_routes
+
+    register_database_maintenance_routes(app)
     """Register all database API routes with the Flask app."""
 
     @app.route("/api/search-sentences")
@@ -1275,13 +1279,13 @@ def register_database_api_routes(app):
                     "cards_mined_daily_target": getattr(config, "cards_mined_daily_target", 10),
                     "regex_out_punctuation": config.regex_out_punctuation,
                     "regex_out_repetitions": config.regex_out_repetitions,
-                    "reading_time_adaptive_v2": getattr(config, "reading_time_adaptive_v2", False),
                     "extra_punctuation_regex": getattr(config, "extra_punctuation_regex", ""),
                     "tadoku_configured": bool(
                         getattr(config, "tadoku_username", "") and getattr(config, "tadoku_password", "")
                     ),
                     "tadoku_username": getattr(config, "tadoku_username", ""),
                     "tadoku_language_code": getattr(config, "tadoku_language_code", "jpn"),
+                    "tadoku_title_source": getattr(config, "tadoku_title_source", "english"),
                     "tadoku_daily_sync_enabled": bool(getattr(config, "tadoku_daily_sync_enabled", False)),
                     "tadoku_daily_sync_time": getattr(config, "tadoku_daily_sync_time", "00:01"),
                     "tadoku_daily_sync_deduplicate": bool(getattr(config, "tadoku_daily_sync_deduplicate", True)),
@@ -1381,12 +1385,12 @@ def register_database_api_routes(app):
             cards_mined_daily_target = data.get("cards_mined_daily_target")
             regex_out_punctuation = data.get("regex_out_punctuation")
             regex_out_repetitions = data.get("regex_out_repetitions")
-            reading_time_adaptive_v2 = data.get("reading_time_adaptive_v2")
             extra_punctuation_regex = data.get("extra_punctuation_regex")
             tadoku_username = data.get("tadoku_username")
             tadoku_password = data.get("tadoku_password")
             tadoku_clear_credentials = data.get("tadoku_clear_credentials")
             tadoku_language_code = data.get("tadoku_language_code")
+            tadoku_title_source = data.get("tadoku_title_source")
             tadoku_daily_sync_enabled = data.get("tadoku_daily_sync_enabled")
             tadoku_daily_sync_time = data.get("tadoku_daily_sync_time")
             tadoku_daily_sync_deduplicate = data.get("tadoku_daily_sync_deduplicate")
@@ -1509,11 +1513,6 @@ def register_database_api_routes(app):
                     return jsonify({"error": "regex_out_repetitions must be a boolean value"}), 400
                 settings_to_update["regex_out_repetitions"] = regex_out_repetitions
 
-            if reading_time_adaptive_v2 is not None:
-                if not isinstance(reading_time_adaptive_v2, bool):
-                    return jsonify({"error": "reading_time_adaptive_v2 must be a boolean value"}), 400
-                settings_to_update["reading_time_adaptive_v2"] = reading_time_adaptive_v2
-
             if extra_punctuation_regex is not None:
                 if not isinstance(extra_punctuation_regex, str):
                     return jsonify({"error": "extra_punctuation_regex must be a string value"}), 400
@@ -1532,7 +1531,7 @@ def register_database_api_routes(app):
                     return jsonify({"error": "tadoku_username must be a string value"}), 400
                 tadoku_username = tadoku_username.strip()
                 if len(tadoku_username) > 320:
-                    return jsonify({"error": "Tadoku username is too long"}), 400
+                    return jsonify({"error": "Tadoku email is too long"}), 400
                 settings_to_update["tadoku_username"] = tadoku_username
 
             if tadoku_password is not None:
@@ -1556,6 +1555,11 @@ def register_database_api_routes(app):
                 ):
                     return jsonify({"error": "Tadoku language code must be a three-letter ISO 639-3 code"}), 400
                 settings_to_update["tadoku_language_code"] = tadoku_language_code.strip().lower()
+
+            if tadoku_title_source is not None:
+                if not isinstance(tadoku_title_source, str) or tadoku_title_source not in TADOKU_TITLE_SOURCES:
+                    return jsonify({"error": "Tadoku title source must be english, original, or romaji"}), 400
+                settings_to_update["tadoku_title_source"] = tadoku_title_source
 
             for setting_name, setting_value in (
                 ("tadoku_daily_sync_enabled", tadoku_daily_sync_enabled),
@@ -1687,8 +1691,6 @@ def register_database_api_routes(app):
                 config.regex_out_punctuation = settings_to_update["regex_out_punctuation"]
             if "regex_out_repetitions" in settings_to_update:
                 config.regex_out_repetitions = settings_to_update["regex_out_repetitions"]
-            if "reading_time_adaptive_v2" in settings_to_update:
-                config.reading_time_adaptive_v2 = settings_to_update["reading_time_adaptive_v2"]
             if "extra_punctuation_regex" in settings_to_update:
                 config.extra_punctuation_regex = settings_to_update["extra_punctuation_regex"]
             if "tadoku_username" in settings_to_update:
@@ -1699,6 +1701,8 @@ def register_database_api_routes(app):
                 config.tadoku_session_cookie = ""
             if "tadoku_language_code" in settings_to_update:
                 config.tadoku_language_code = settings_to_update["tadoku_language_code"]
+            if "tadoku_title_source" in settings_to_update:
+                config.tadoku_title_source = settings_to_update["tadoku_title_source"]
             if "tadoku_daily_sync_enabled" in settings_to_update:
                 config.tadoku_daily_sync_enabled = settings_to_update["tadoku_daily_sync_enabled"]
             if "tadoku_daily_sync_time" in settings_to_update:
@@ -2574,6 +2578,42 @@ def register_database_api_routes(app):
                 return jsonify({"error": "At least 1 game must be selected for merging"}), 400
 
             # Validate that all games exist
+            from GameSentenceMiner.util.database.game_archive import archive_summaries, merge_archived_games
+
+            archives = archive_summaries()
+            source_ids = _get_game_record_ids_for_names(games_to_merge) if archives else []
+            target_ids = _get_game_record_ids_for_names([target_game]) if archives else []
+            if any(gid in archives for gid in source_ids + target_ids):
+                if target_game in games_to_merge or len(set(games_to_merge)) != len(games_to_merge):
+                    return jsonify({"error": "Choose distinct source games and a separate target game"}), 400
+                if len(target_ids) != 1 or len(source_ids) != len(games_to_merge):
+                    return jsonify(
+                        {"error": "Choose existing games with distinct names to merge archived statistics"}
+                    ), 400
+                moved = merge_archived_games(target_ids[0], source_ids, target_game)
+                from GameSentenceMiner.util.database.game_archive import archive_summary
+
+                total = (
+                    archive_summary(target_ids[0])["archived_lines"]
+                    + GameLinesTable._db.fetchone("SELECT COUNT(*) FROM game_lines WHERE game_id=?", (target_ids[0],))[
+                        0
+                    ]
+                )
+                return jsonify(
+                    {
+                        "message": "Game history merged",
+                        "primary_game": target_game,
+                        "merged_games": games_to_merge,
+                        "lines_moved": moved,
+                        "total_lines_in_primary": total,
+                        "merge_summary": {
+                            "primary_game": target_game,
+                            "secondary_games": games_to_merge,
+                            "lines_moved": moved,
+                            "total_lines_after_merge": total,
+                        },
+                    }
+                ), 200
             existing_games = GameLinesTable.get_all_games_with_lines()
             invalid_games = [name for name in games_to_merge if name not in existing_games]
 

@@ -25,23 +25,33 @@ import {
 } from '../util.js';
 import { resolveWineLaunch, findLinuxGamePid, type WineLaunchContext } from './linux_wine.js';
 import { startWineFridaConnection, type WineProcessConnection } from './wine_frida.js';
-import { getConfiguredSinglePort } from '../gsm_config.js';
+import { getConfiguredTargetLanguage, gsmBackendUrl } from '../gsm_config.js';
+import { rememberHookSample } from '../../shared/texthook_quality.js';
 import {
     getGameExePathForScene,
     setGameExePathForScene,
+    getAutoUpdateTexthook,
+    setAutoUpdateTexthook,
 } from '../store.js';
 import { mainWindow, sendReloadSettings, sendTextHookLine, sendTextHookStatus } from '../main.js';
 import {
-    TEXTHOOK_DOWNLOAD_DIR,
+    getTexthookRuntimeDir,
     FORCE_TEXTHOOK_DOWNLOAD,
     downloadTexthookEngines,
     getEngineStatus,
-    checkForTexthookUpdates,
+    getLocalEngineStatus,
+    isTexthookInstalled,
+    prepareTexthookUpdate,
+    activateTexthookUpdate,
+    discardTexthookUpdate,
+    type PreparedTexthookUpdate,
 } from './texthook_downloader.js';
+import { TextHookUpdateManager } from '../services/texthook_updates.js';
 import {
     getCurrentScene,
     getExecutableNameFromSource,
     getWindowTitleFromSource,
+    syncProcessPausingTargetForCurrentScene,
 } from './obs.js';
 import {
     callAgentUiRpc as callLocalAgentUiRpc,
@@ -144,6 +154,8 @@ interface ActiveSession {
     exeName: string;
     source: TextHookStartSource;
     selectedHookId: string | null;
+    /** Last selected-hook input, before truncation, to suppress unchanged redraws. */
+    lastSelectedHookText: string | null;
     hooks: Map<string, HookEntry>;
     /** Hook id we will auto-select when it shows up (loaded from a profile). */
     autoSelectHookId: string | null;
@@ -172,6 +184,24 @@ interface ActiveSession {
 }
 
 let session: ActiveSession | null = null;
+let hookStartInProgress = false;
+let engineUpdates: TextHookUpdateManager<PreparedTexthookUpdate> | null = null;
+
+function getEngineUpdates(): TextHookUpdateManager<PreparedTexthookUpdate> {
+    engineUpdates ??= new TextHookUpdateManager({
+        localStatus: getLocalEngineStatus,
+        remoteStatus: getEngineStatus,
+        prepare: prepareTexthookUpdate,
+        activate: activateTexthookUpdate,
+        discard: discardTexthookUpdate,
+        version: (prepared) => prepared.manifest.version,
+        isBusy: () => hookStartInProgress || getRuntimeStatus().running,
+        automaticEnabled: getAutoUpdateTexthook,
+        setAutomatic: setAutoUpdateTexthook,
+        onState: (state) => emitToRenderer('texthook.engineUpdateState', state),
+    });
+    return engineUpdates;
+}
 
 const TEXTRACTOR_HOOK_LINE = /^\[([0-9a-fA-F]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^\]]+)\] (.*)$/;
 const LUNA_HOOK_LINE = /^\[#([0-9a-fA-F]+)\|([^\]]+)\] (.*)$/;
@@ -238,6 +268,7 @@ function emitStatus(): void {
     // Notify the backend only when the running state actually changes, so it can
     // pause/resume clipboard polling like a connected websocket source.
     const running = Boolean(status.running);
+    if (!running) engineUpdates?.notifyIdle();
     if (running !== lastBackendRunning) {
         lastBackendRunning = running;
         try {
@@ -351,7 +382,7 @@ function getEngineCliPath(engine: CliTextHookEngine, arch: TextHookArchitecture)
             ? path.join('luna_builds', arch === 'x86' ? 'LunaHostCLI32.exe' : 'LunaHostCLI64.exe')
             : path.join('textractor_builds', arch === 'x86' ? '_x86' : '_x64', 'TextractorCLI.exe');
 
-    const downloaded = path.join(TEXTHOOK_DOWNLOAD_DIR, rel);
+    const downloaded = path.join(getTexthookRuntimeDir(), rel);
     if (fs.existsSync(downloaded)) return downloaded;
     // When forced, skip the bundled-assets fallback so startHookSession
     // triggers the real download even in dev (GSM_FORCE_TEXTHOOK_DOWNLOAD=1).
@@ -975,7 +1006,9 @@ function isIgnorableEngineLine(line: string): boolean {
         line === '======================' ||
         line === 'Now showing text from all hooks.' ||
         line === 'Now showing text only from selected hook.' ||
-        /^Selected hook #[0-9a-fA-F]+(?: \(Handle: [0-9a-fA-F]+\))?(?:Now showing text only from selected hook\.)?$/.test(line)
+        /^Now showing text only from \d+ selected hook\(s\)\.$/.test(line) ||
+        // Support both CLI acknowledgement formats, including joined status lines.
+        /^Selected hook(?: #[0-9a-fA-F]+(?: \(Handle: [0-9a-fA-F]+\))?|: [0-9a-fA-F]+)(?:\s*Now showing text only from (?:selected hook|\d+ selected hook\(s\))\.)?$/.test(line)
     );
 }
 
@@ -1212,9 +1245,7 @@ function applyHookPreviewText(hookId: string, fn: string, text: string): void {
     const entry = getOrCreateHookEntry(hookId, fn);
     if (!entry || !text) return;
     entry.preview = text.length > 80 ? text.slice(0, 80) + '…' : text;
-    if (entry.samples.length < 3) {
-        entry.samples.push(text);
-    }
+    entry.samples = rememberHookSample(entry.samples, text);
     emitHooks();
 }
 
@@ -1287,6 +1318,13 @@ function recordHookEvent(hookId: string, fn: string, text: string): void {
     const entry = getOrCreateHookEntry(hookId, fn);
     if (!entry) return;
     const cleanedText = sanitizedText.text;
+    if (session.selectedHookId === hookId) {
+        // Rendering hooks can emit the same displayed subtitle hundreds of times
+        // in one stdout chunk. Drop repeats before preview or backend delivery;
+        // the backend's spam filter runs before its duplicate detection.
+        if (cleanedText && session.lastSelectedHookText === cleanedInput) return;
+        if (!cleanedText) session.lastSelectedHookText = null;
+    }
     if (cleanedText) {
         queueHookPreviewText(hookId, fn, cleanedText);
     } else {
@@ -1310,6 +1348,7 @@ function recordHookEvent(hookId: string, fn: string, text: string): void {
     }
 
     if (session.selectedHookId === hookId && cleanedText) {
+        session.lastSelectedHookText = cleanedInput;
         queueSelectedHookText({
             text: cleanedText,
             hookId,
@@ -1420,7 +1459,7 @@ export interface StartHookOptions {
     source?: TextHookStartSource;
     /** Override the auto-detected host PID (used by the auto-launcher). */
     pidOverride?: number;
-    /** Internal recovery path: force a specific hook engine architecture. */
+    /** Architecture from native process metadata, or an internal recovery override. */
     archOverride?: TextHookArchitecture;
     /** Internal recovery path: prevent architecture retry loops. */
     architectureFallbackAttempted?: boolean;
@@ -1435,6 +1474,24 @@ export interface StartHookResult {
 }
 
 export async function startHookSession(options: StartHookOptions = {}): Promise<StartHookResult> {
+    if (engineUpdates?.isInstalling() || (engineUpdates?.isPreparing() && !isTexthookInstalled())) {
+        return { success: false, error: 'Hook engines are being prepared. Try attaching again when they are ready.' };
+    }
+    if (hookStartInProgress) {
+        return { success: false, error: 'A text hook session is already starting.' };
+    }
+    // Reserve the start before any asynchronous target discovery. Manual updates
+    // must not replace the CLI/DLLs while an auto-launcher attachment is starting.
+    hookStartInProgress = true;
+    try {
+        return await startHookSessionInternal(options);
+    } finally {
+        hookStartInProgress = false;
+        engineUpdates?.notifyIdle();
+    }
+}
+
+async function startHookSessionInternal(options: StartHookOptions): Promise<StartHookResult> {
     await reconnectDetachedAgentHookSession();
     if (session || isAgentHookRunning() || isEngineHookRunning()) {
         return { success: false, error: 'A text hook session is already running.' };
@@ -1620,7 +1677,7 @@ export async function startHookSession(options: StartHookOptions = {}): Promise<
     }
 
     let cliPath = getEngineCliPath(engine, target.arch);
-    if (!fs.existsSync(cliPath)) {
+    if (!fs.existsSync(cliPath) || !isTexthookInstalled()) {
         mainWindow?.webContents.send('texthook.engineDownloadStarted', {});
         try {
             await downloadTexthookEngines((progress) => {
@@ -1681,6 +1738,7 @@ export async function startHookSession(options: StartHookOptions = {}): Promise<
         exeName,
         source,
         selectedHookId: null,
+        lastSelectedHookText: null,
         hooks: new Map(),
         autoSelectHookId: profile && profile.engine === engine && profile.autoHook ? profile.hookId ?? null : null,
         autoSelectHookFunction:
@@ -1875,6 +1933,7 @@ export async function selectHook(hookId: string, options: SelectHookOptions = {}
         return false;
     }
     session.selectedHookId = hookId;
+    session.lastSelectedHookText = null;
     if (!options.silent) {
         const entry = session.hooks.get(hookId);
         emitLog(`Selected hook ${hookId}${entry ? ` (${entry.function})` : ''}.`);
@@ -2010,11 +2069,6 @@ function notifyTextHookUserStop(status: TextHookRuntimeStatus): void {
 // IPC registration
 // ---------------------------------------------------------------------------
 
-/** Build a URL to the local Python backend (single-port mode). */
-function gsmBackendUrl(routePath: string): string {
-    return `http://localhost:${getConfiguredSinglePort()}${routePath}`;
-}
-
 export function registerTextHookIPC(): void {
     setRuntimeTextHookMaxBufferSize(textHookMaxBufferSize);
     configureAgentHookCallbacks({
@@ -2042,7 +2096,10 @@ export function registerTextHookIPC(): void {
         await reconnectDetachedAgentHookSession();
         return getRuntimeStatus();
     });
-    ipcMain.handle('texthook.getSettings', async () => ({ maxBufferSize: textHookMaxBufferSize }));
+    ipcMain.handle('texthook.getSettings', async () => ({
+        maxBufferSize: textHookMaxBufferSize,
+        targetLanguage: getConfiguredTargetLanguage(GSM_CONFIG_FILE),
+    }));
     ipcMain.handle('texthook.setMaxBufferSize', async (_event, value: unknown) =>
         setTextHookMaxBufferSize(value),
     );
@@ -2233,20 +2290,8 @@ export function registerTextHookIPC(): void {
                 return { success: false, error: 'sceneName is required' };
             }
             setGameExePathForScene(sceneName, exePath);
-            // Write the exe basename through to the Python process-pausing target so the
-            // "Wayland override" (process_pausing.linux_target_process) stays in sync.
-            try {
-                await fetch(gsmBackendUrl('/linux/set_target_process'), {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ target: exePath }),
-                });
-            } catch (err) {
-                emitLog(
-                    `Could not sync game executable to process-pausing target: ${(err as Error).message}`,
-                    'warn',
-                );
-            }
+            // Only the active scene drives process pausing, and editing another scene leaves it alone.
+            syncProcessPausingTargetForCurrentScene();
             return { success: true };
         },
     );
@@ -2283,34 +2328,34 @@ export function registerTextHookIPC(): void {
         }
     });
 
-    ipcMain.handle('texthook.getEngineStatus', async () => getEngineStatus());
-
-    ipcMain.handle('texthook.downloadEngines', async () => {
-        mainWindow?.webContents.send('texthook.engineDownloadStarted', {});
-        try {
-            await downloadTexthookEngines((progress) => {
-                mainWindow?.webContents.send('texthook.engineDownloadProgress', progress);
-            });
-            mainWindow?.webContents.send('texthook.engineDownloadComplete', { success: true });
-            return { success: true };
-        } catch (err) {
-            const error = (err as Error).message;
-            mainWindow?.webContents.send('texthook.engineDownloadComplete', { success: false, error });
-            return { success: false, error };
-        }
+    ipcMain.handle('texthook.getEngineStatus', () => getEngineUpdates().getState());
+    ipcMain.handle('texthook.checkEngineUpdates', () => getEngineUpdates().check(false));
+    ipcMain.handle('texthook.installEngineVersion', (_event, version: unknown) => {
+        if (typeof version !== 'string') throw new Error('Invalid engine package version.');
+        return getEngineUpdates().downloadVersion(version);
+    });
+    ipcMain.handle('texthook.downloadEngines', () => getEngineUpdates().download());
+    ipcMain.handle('texthook.setAutomaticEngineUpdates', (_event, enabled: unknown) => {
+        if (typeof enabled !== 'boolean') throw new Error('Expected an automatic updates preference.');
+        getEngineUpdates().setAutomatic(enabled);
+        return getEngineUpdates().getState();
     });
 }
 
-export { checkForTexthookUpdates };
+export function checkForTexthookUpdates(): void {
+    getEngineUpdates().start();
+}
 
 // Used by main.ts on app shutdown to make sure the CLI process is killed.
 export function shutdownTextHook(): void {
+    engineUpdates?.dispose();
     teardownSession();
     stopEngineHookSession();
     shutdownAgentHookSession();
 }
 
 export async function shutdownTextHookForUpdate(): Promise<void> {
+    engineUpdates?.dispose();
     teardownSession();
     stopEngineHookSession();
     stopLocalAgentHookSession();

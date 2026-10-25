@@ -104,6 +104,7 @@ try:
         download_oneocr_dlls_if_needed,
         write_obs_configs,
     )
+    from GameSentenceMiner.util.media_paths import ensure_output_directory, ensure_recording_directory
     from GameSentenceMiner.util.platform.hotkey import hotkey_manager
     from GameSentenceMiner.util.text_log import (
         MAX_PREVIOUS_LINES,
@@ -550,6 +551,13 @@ class GSMApplication:
             lambda: get_config().hotkeys.manual_overlay_scan_gamepad,
             call_overlay_processor,
         )
+        from GameSentenceMiner.ui.config.tabs.hotkeys import copy_game_screenshot_to_clipboard
+
+        hotkey_manager.register(lambda: get_config().hotkeys.copy_game_screenshot, copy_game_screenshot_to_clipboard)
+        hotkey_manager.register_gamepad(
+            lambda: get_config().hotkeys.copy_game_screenshot_gamepad,
+            copy_game_screenshot_to_clipboard,
+        )
         hotkey_manager.register(
             lambda: get_config().hotkeys.pause_text_intake, _get_gametext_module().toggle_text_intake_paused
         )
@@ -611,7 +619,7 @@ class GSMApplication:
         )
 
     def _ensure_settings_window(self):
-        """Create the heavy ConfigWindow only when something needs to show it."""
+        """Return the shared ConfigWindow, creating it on the GUI thread if needed."""
         lock = getattr(self, "_settings_window_lock", None)
         if lock is None:
             lock = threading.Lock()
@@ -644,10 +652,10 @@ class GSMApplication:
     def open_log(self, *args) -> None:
         from pathlib import Path
 
-        from GameSentenceMiner.util.log_paths import get_process_log_path
+        from GameSentenceMiner.util.log_paths import get_component_log_path
 
         log_dir = Path(get_app_directory()) / "logs"
-        log_file_path = get_process_log_path(log_dir, "gamesentenceminer")
+        log_file_path = get_component_log_path(log_dir, "backend")
 
         if not log_file_path.exists():
             logger.error("Log file not found!")
@@ -846,11 +854,11 @@ class GSMApplication:
                 stop_authoritative_text_runtime()
             except Exception as e:
                 logger.error(f"Error stopping authoritative text runtime: {e}")
-            _get_websocket_manager().stop_all()
             try:
                 _get_texthooking_page_module().stop_web_server()
             except Exception as e:
                 logger.error(f"Error stopping TextFeed HTTP transport: {e}")
+            _get_websocket_manager().stop_all()
             try:
                 _get_anki_module().stop_anki_runtime()
             except Exception as e:
@@ -990,8 +998,7 @@ class GSMApplication:
             except Exception as e:
                 logger.error(f"Error stopping file watcher: {e}")
 
-        watch_path = get_config().paths.folder_to_watch
-        os.makedirs(watch_path, exist_ok=True)
+        watch_path = ensure_recording_directory()
 
         observer = Observer()
         observer.schedule(
@@ -1156,11 +1163,11 @@ class GSMApplication:
             except Exception as e:
                 logger.warning(f"Failed to check/populate rollup table on startup: {e}")
 
+            ensure_recording_directory()
             try:
-                os.makedirs(get_config().paths.folder_to_watch, exist_ok=True)
-                os.makedirs(get_config().paths.output_folder, exist_ok=True)
-            except Exception as e:
-                logger.error(f"Error creating necessary directories, certain directories may not exist: {e}")
+                ensure_output_directory()
+            except OSError as e:
+                logger.error(f"Could not prepare GSM's output folder: {e}")
 
             _set_audio_callback(self._replay_extractor.get_audio)
 
@@ -1189,13 +1196,16 @@ class GSMApplication:
             def on_snapshot(snapshot: dict) -> None:
                 send_message(FunctionName.FOREGROUND_WINDOW_CHANGED.value, snapshot)
 
+            def on_emulator_snapshot(snapshot: dict) -> None:
+                send_message(FunctionName.EMULATOR_WINDOW_CHANGED.value, snapshot)
+
             def on_status(status: str, error: str = "") -> None:
                 send_message(
                     FunctionName.FOREGROUND_WINDOW_HOOK_STATUS.value,
                     {"status": status, "error": error},
                 )
 
-            hook = ForegroundWindowHook(on_snapshot, on_status)
+            hook = ForegroundWindowHook(on_snapshot, on_status, on_emulator_snapshot=on_emulator_snapshot)
             self.foreground_window_hook = hook
             hook.start()
         except Exception as exc:
@@ -1464,7 +1474,7 @@ class GSMApplication:
 
         if is_gsm_cloud_preview_enabled():
             gsm_cloud_auth_cache_service.start_background_loop()
-            cloud_sync_service.start_background_loop()
+        cloud_sync_service.start_background_loop()
         self._start_thread(_get_run_text_hooker_page(), "texthooker-page")
 
     def handle_ipc_command(self, cmd: dict) -> None:
@@ -1519,6 +1529,12 @@ class GSMApplication:
                 )
 
                 request_overlay_settings_open()
+            elif function == FunctionName.STOP_OVERLAY.value:
+                from GameSentenceMiner.web.gsm_websocket import request_overlay_shutdown
+
+                data = cmd.get("data")
+                if isinstance(data, dict):
+                    request_overlay_shutdown(data.get("launchId"))
             elif function == FunctionName.OPEN_TEXTHOOKER.value:
                 self.open_texthooker()
             elif function == FunctionName.SWITCH_PROFILE.value:
@@ -1741,6 +1757,15 @@ class GSMApplication:
         if current_scene:
             self._check_profile_for_scene_tick(current_scene)
 
+    def _on_obs_recording_directory_changed(self, directory: str) -> None:
+        if self.state.file_watcher_path != directory:
+            self.start_file_watcher()
+
+    def _register_recording_directory_watcher(self) -> None:
+        service = getattr(obs, "obs_service", None)
+        if service:
+            service.on_recording_directory_changed(self._on_obs_recording_directory_changed)
+
     async def register_scene_switcher_callback(self) -> None:
         def scene_switcher_callback(scene):
             logger.info(f"Scene changed to: {scene}")
@@ -1778,6 +1803,7 @@ class GSMApplication:
         if gsm_status.obs_connected:
             await self.register_scene_switcher_callback()
             self._register_scene_observed_profile_check()
+            self._register_recording_directory_watcher()
             self.get_previous_lines_for_game()
             await check_obs_folder_is_correct()
             self.on_config_changed()
@@ -1826,6 +1852,7 @@ class GSMApplication:
 
         await self.register_scene_switcher_callback()
         self._register_scene_observed_profile_check()
+        self._register_recording_directory_watcher()
         self.get_previous_lines_for_game()
         await check_obs_folder_is_correct()
         self.on_config_changed()
@@ -1956,11 +1983,9 @@ class GSMApplication:
 
         qt_main = _get_qt_main_module()
         qt_main.get_qt_app()
-        gsm_state.config_app = self.state.settings_window
         gsm_state.config_app_factory = self._ensure_settings_window
+        self._ensure_settings_window()
         open_config_on_startup = get_config().general.open_config_on_startup
-        if open_config_on_startup:
-            self._ensure_settings_window()
 
         self.start_background_threads()
         self.register_hotkeys()

@@ -15,6 +15,11 @@ from pathlib import Path
 from sys import platform
 from typing import Any, Callable, List, Dict, Optional, ClassVar
 
+from GameSentenceMiner.util.data_directory import (
+    get_app_directory,
+    get_default_app_directory,  # noqa: F401 - public compatibility import
+)
+
 OFF = "OFF"
 # VOSK = 'VOSK'
 FIRERED = "FIRERED"
@@ -34,12 +39,17 @@ WHISPER_TURBO = "turbo"
 
 AI_GEMINI = "Gemini"
 AI_GROQ = "Groq"
+AI_ZAI = "Z.ai"
 AI_OPENAI = "OpenAI"
 AI_OLLAMA = "Ollama"
 AI_LM_STUDIO = "LM Studio"
 AI_GSM_CLOUD = "GSM Cloud"
 AI_DEEPL = "DeepL"
 
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_GEMINI_BACKUP_MODEL = "gemma-4-31b-it"
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
+DEFAULT_GROQ_BACKUP_MODEL = "openai/gpt-oss-20b"
 GSM_CLOUD_DEFAULT_MODEL = "gpt-4.1-nano-2025-04-14"
 GSM_CLOUD_PREVIEW_ENV = "GSM_CLOUD_PREVIEW"
 GSM_CLOUD_AI_PREVIEW_ENV = "GSM_CLOUD_AI_PREVIEW"
@@ -82,20 +92,16 @@ GEMINI_MODEL_ALIASES = {
     "gemini-3-pro": "gemini-3-pro-preview",
 }
 
-LEGACY_GEMINI_MODEL_ALIASES = {
-    "gemini-2.5-flash-lite-preview-06-17": "gemini-2.5-flash-lite",
-}
-
 
 def normalize_gemini_model_name(model_name: str) -> str:
-    normalized = str(model_name or "").strip()
+    normalized = str(model_name or "").strip().removeprefix("models/")
     if not normalized:
         return ""
     lowered = normalized.lower()
+    if lowered.startswith("gemini-2."):
+        return DEFAULT_GEMINI_MODEL
     if lowered in GEMINI_MODEL_ALIASES:
         return GEMINI_MODEL_ALIASES[lowered]
-    if lowered in LEGACY_GEMINI_MODEL_ALIASES:
-        return LEGACY_GEMINI_MODEL_ALIASES[lowered]
     return normalized
 
 
@@ -796,6 +802,7 @@ class AnkiField:
 @dataclass_json
 @dataclass
 class Anki:
+    CONFIRMATION_AUDIO_STEPS: ClassVar[tuple[float, ...]] = (0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0)
     _FIELD_DEFAULTS: ClassVar[Dict[str, AnkiField]] = {
         "sentence": AnkiField(name="Sentence", enabled=True, overwrite=True, append=False, core=True),
         "sentence_audio": AnkiField(name="SentenceAudio", enabled=True, overwrite=True, append=False, core=True),
@@ -827,19 +834,25 @@ class Anki:
     }
 
     enabled: bool = True
-    update_anki: bool = True
     show_update_confirmation_dialog_v2: bool = True
+    skip_confirmation_for_unvoiced: bool = False
     auto_accept_timer: int = 10
     confirmation_always_on_top: bool = True
     confirmation_focus_on_show: bool = True
+    confirmation_audio_step: float = 0.25
     confirmation_gamepad_enabled: bool = False
     confirmation_gamepad_focus_up: str = "12"
     confirmation_gamepad_focus_down: str = "13"
     confirmation_gamepad_focus_left: str = "14"
     confirmation_gamepad_focus_right: str = "15"
     confirmation_gamepad_activate: str = "0"
+    confirmation_gamepad_play_audio: str = "3"
     confirmation_gamepad_confirm_with_audio: str = "2"
     confirmation_gamepad_confirm_without_audio: str = "1"
+    confirmation_gamepad_add_previous_line: str = "6"
+    confirmation_gamepad_add_next_line: str = "7"
+    confirmation_gamepad_expand_audio_start: str = "4"
+    confirmation_gamepad_expand_audio_end: str = "5"
     url: str = "http://127.0.0.1:8765"
     note_type: str = ""
     available_fields: List[str] = field(default_factory=list)
@@ -893,6 +906,11 @@ class Anki:
     remove_overlay_tag: bool = False
 
     def __post_init__(self):
+        if (
+            isinstance(self.confirmation_audio_step, bool)
+            or self.confirmation_audio_step not in self.CONFIRMATION_AUDIO_STEPS
+        ):
+            self.confirmation_audio_step = 0.25
         if self.custom_tags is None:
             self.custom_tags = ["GSM"]
         if self.tags_to_check is None:
@@ -1007,8 +1025,14 @@ for _legacy_key, _attr_name in Anki._LEGACY_FIELD_MAP.items():
 class Features:
     full_auto: bool = True
     notify_on_update: bool = True
+    notify_on_audio_generated: bool = True
+    notify_on_screenshot_saved: bool = True
+    notify_on_anki_enhancement_failed: bool = True
+    notify_on_errors: bool = True
+    notify_on_obs_warning: bool = True
+    notify_on_text_intake_state: bool = True
     open_anki_edit: bool = False
-    open_anki_in_browser: bool = True
+    open_anki_in_browser: bool = False
     browser_query: str = ""
     generate_longplay: bool = False
 
@@ -1017,6 +1041,7 @@ class Features:
 @dataclass
 class Experimental:
     enable_experimental_features: bool = False
+    enable_hachidori: bool = False
     enable_tokenization: bool = False
     tokenization_backend: str = "sudachi"
     tokenization_sudachi_dictionary: str = "small"
@@ -1032,6 +1057,7 @@ class ProcessPausing:
     overlay_manual_hotkey_requests_pause: bool = False
     overlay_texthooker_hotkey_requests_pause: bool = False
     overlay_gamepad_navigation_requests_pause: bool = False
+    anki_confirmation_requests_pause: bool = False
     # Linux only: process name of the game to suspend (e.g. "eldenring.exe" under
     # Proton, or a native binary name). Linux has no window handle to resolve a PID
     # from, so the game is matched by process name. Mainly for Wayland users — leave
@@ -1075,6 +1101,9 @@ class AnimatedScreenshotSettings:
     quality: int = 8  # 0-10
     max_width: int = 960  # 0 disables scaling
     adaptive_avif: bool = False
+    target_size_kb: int = 0  # Approximate AVIF size in KiB; 0 keeps existing sizing.
+    size_priority: str = "balanced"
+    only_when_voice: bool = False
     faststart: bool = True
     encoder_fallback: bool = True
     scaled_quality: int = 10  # 0-90 for webp, encoder-specific CRF for avif
@@ -1086,6 +1115,13 @@ class AnimatedScreenshotSettings:
         self.quality = max(0, min(10, int(self.quality or 0)))
         self.max_width = max(0, min(3840, int(self.max_width or 0)))
         self.adaptive_avif = bool(self.adaptive_avif)
+        try:
+            self.target_size_kb = max(0, min(102400, int(self.target_size_kb or 0)))
+        except (TypeError, ValueError, OverflowError):
+            self.target_size_kb = 0
+        if self.size_priority not in ("prefer_fps", "prefer_quality", "balanced"):
+            self.size_priority = "balanced"
+        self.only_when_voice = bool(self.only_when_voice)
         self.faststart = bool(self.faststart)
         self.encoder_fallback = bool(self.encoder_fallback)
         if self.codec not in ANIMATED_SCREENSHOT_CODECS:
@@ -1220,6 +1256,8 @@ class Hotkeys:
     unmute_target_window_on_focus: bool = True
     manual_overlay_scan: str = ""
     manual_overlay_scan_gamepad: str = ""
+    copy_game_screenshot: str = "f12"
+    copy_game_screenshot_gamepad: str = ""
     process_pause: str = ""
     process_pause_gamepad: str = ""
     pause_text_intake: str = ""
@@ -1290,8 +1328,13 @@ class Advanced:
     screenshot_capture_backend_v2: str = SCREENSHOT_CAPTURE_BACKEND_AUTO
     wgc_capture_fps: int = DEFAULT_MAIN_WGC_CAPTURE_FPS
     mute_game_on_minimize: bool = False
+    mute_game_on_background: bool = False
+    mute_game_on_background_delay_seconds: int = 5
     cloud_sync_enabled: bool = False
     cloud_sync_auto_sync: bool = False
+    cloud_sync_protocol: str = "relay-v2"
+    cloud_sync_key: str = ""
+    cloud_sync_settings_groups: List[str] = field(default_factory=list)
     cloud_sync_api_url: str = ""
     cloud_sync_email: str = ""
     cloud_sync_api_token: str = ""
@@ -1317,6 +1360,12 @@ class Advanced:
             self.wgc_capture_fps,
             DEFAULT_MAIN_WGC_CAPTURE_FPS,
         )
+        try:
+            self.mute_game_on_background_delay_seconds = max(
+                0, min(300, int(self.mute_game_on_background_delay_seconds))
+            )
+        except (TypeError, ValueError, OverflowError):
+            self.mute_game_on_background_delay_seconds = 5
         self.cloud_sync_api_url = str(self.cloud_sync_api_url or "").strip().rstrip("/")
         self.cloud_sync_email = str(self.cloud_sync_email or "").strip()
         self.cloud_sync_api_token = str(self.cloud_sync_api_token or "").strip()
@@ -1325,7 +1374,7 @@ class Advanced:
         self.cloud_sync_push_batch_size = max(1, min(5000, int(self.cloud_sync_push_batch_size or 5000)))
         self.cloud_sync_max_server_changes = max(1, min(5000, int(self.cloud_sync_max_server_changes or 5000)))
         self.cloud_sync_timeout_seconds = max(5, min(120, int(self.cloud_sync_timeout_seconds or 20)))
-        if not is_gsm_cloud_preview_enabled():
+        if not is_gsm_cloud_preview_enabled() and self.cloud_sync_protocol == "legacy":
             self.cloud_sync_enabled = False
             self.cloud_sync_auto_sync = False
 
@@ -1339,13 +1388,16 @@ class Ai:
     deepl_api_key: str = ""
     deepl_target_lang: str = "EN"
     provider: str = AI_GEMINI
-    gemini_model: str = "gemma-3-27b-it"
-    gemini_backup_model: str = ""
-    groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
-    groq_backup_model: str = ""
+    gemini_model: str = DEFAULT_GEMINI_MODEL
+    gemini_backup_model: str = DEFAULT_GEMINI_BACKUP_MODEL
+    groq_model: str = DEFAULT_GROQ_MODEL
+    groq_backup_model: str = DEFAULT_GROQ_BACKUP_MODEL
     gemini_api_key: str = ""
     api_key: str = ""  # Legacy support, will be moved to gemini_api_key if provider is gemini
     groq_api_key: str = ""
+    zai_api_key: str = ""
+    zai_model: str = "glm-4.7-flash"
+    zai_backup_model: str = ""
     open_ai_url: str = ""
     open_ai_model: str = ""
     open_ai_backup_model: str = ""
@@ -1370,6 +1422,7 @@ class Ai:
     custom_prompt: str = ""
     custom_texthooker_prompt: str = ""
     custom_full_prompt: str = ""
+    prompt_preset: str = ""  # Empty preserves the legacy canned/custom prompt selection.
     dialogue_context_length: int = 10
     temperature: float = 0.3
     max_output_tokens: int = 4096
@@ -1379,6 +1432,8 @@ class Ai:
         provider_alias_map = {
             "gemini": AI_GEMINI,
             "groq": AI_GROQ,
+            "z.ai": AI_ZAI,
+            "zai": AI_ZAI,
             "openai": AI_OPENAI,
             "ollama": AI_OLLAMA,
             "deepl": AI_DEEPL,
@@ -1396,12 +1451,16 @@ class Ai:
         if not self.gemini_api_key:
             self.gemini_api_key = self.api_key
         if self.gemini_model in ["RECOMMENDED", "OTHER"]:
-            self.gemini_model = "gemini-2.5-flash-lite"
-        if self.gemini_backup_model in ["RECOMMENDED", "OTHER", OFF]:
+            self.gemini_model = DEFAULT_GEMINI_MODEL
+        if self.gemini_backup_model == "RECOMMENDED":
+            self.gemini_backup_model = DEFAULT_GEMINI_BACKUP_MODEL
+        if self.gemini_backup_model in ["OTHER", OFF]:
             self.gemini_backup_model = ""
         if self.groq_model in ["RECOMMENDED", "OTHER"]:
-            self.groq_model = "meta-llama/llama-4-scout-17b-16e-instruct"
-        if self.groq_backup_model in ["RECOMMENDED", "OTHER", OFF]:
+            self.groq_model = DEFAULT_GROQ_MODEL
+        if self.groq_backup_model == "RECOMMENDED":
+            self.groq_backup_model = DEFAULT_GROQ_BACKUP_MODEL
+        if self.groq_backup_model in ["OTHER", OFF]:
             self.groq_backup_model = ""
         if self.open_ai_backup_model == OFF:
             self.open_ai_backup_model = ""
@@ -1416,6 +1475,11 @@ class Ai:
             self.add_to_anki = True
 
         self.groq_model = str(self.groq_model or "").strip()
+        self.zai_api_key = str(self.zai_api_key or "").strip()
+        self.zai_model = str(self.zai_model or "").strip() or "glm-4.7-flash"
+        self.zai_backup_model = str(self.zai_backup_model or "").strip()
+        if self.zai_backup_model in {OFF, self.zai_model}:
+            self.zai_backup_model = ""
         self.groq_backup_model = str(self.groq_backup_model or "").strip()
         self.open_ai_model = str(self.open_ai_model or "").strip()
         self.open_ai_backup_model = str(self.open_ai_backup_model or "").strip()
@@ -1435,9 +1499,13 @@ class Ai:
             self.gsm_cloud_token_expires_at = 0
 
         self.gemini_model = normalize_gemini_model_name(self.gemini_model)
+        previous_gemini_backup = str(self.gemini_backup_model or "").strip().removeprefix("models/").lower()
         self.gemini_backup_model = normalize_gemini_model_name(self.gemini_backup_model)
         if self.gemini_backup_model == self.gemini_model:
-            self.gemini_backup_model = ""
+            # Upgrading two 2.x models must not silently disable failover.
+            self.gemini_backup_model = (
+                DEFAULT_GEMINI_BACKUP_MODEL if previous_gemini_backup.startswith("gemini-2.") else ""
+            )
         if self.groq_backup_model == self.groq_model:
             self.groq_backup_model = ""
         if self.open_ai_backup_model == self.open_ai_model:
@@ -1460,6 +1528,8 @@ class Ai:
         if self.provider == AI_GEMINI and self.gemini_api_key and self.gemini_model:
             return True
         if self.provider == AI_GROQ and self.groq_api_key and self.groq_model:
+            return True
+        if self.provider == AI_ZAI and self.zai_api_key.strip() and self.zai_model.strip():
             return True
         if self.provider == AI_OPENAI and self.open_ai_api_key and self.open_ai_model and self.open_ai_url:
             return True
@@ -1515,6 +1585,7 @@ class Overlay:
     scan_on_mouse_move: bool = True  # only scan on a periodic tick when the cursor moved and is over the game window
     scan_on_overlay_activation: bool = False  # scan when Push to Show/navigation makes the overlay interactive
     text_appears_instantly: bool = False  # send the first overlay OCR pass without waiting for stabilization
+    adaptive_ocr_retries: bool = False  # experimental: retry quickly while overlay text is expanding
     base_scale: float = 0.75  # screenshot scale used before OCR (50% fast -> 100% highest quality)
     inject_scanned_lines: bool = False  # not recommended: persist overlay scans to the log (pollutes stats/texthooker)
     minimum_character_size: int = 0
@@ -1600,6 +1671,7 @@ GSM_OWNED_OVERLAY_FIELDS: Dict[str, GsmOwnedOverlayField] = {
     "scan_on_mouse_move": GsmOwnedOverlayField("scan_on_mouse_move", _coerce_overlay_bool),
     "scan_on_overlay_activation": GsmOwnedOverlayField("scan_on_overlay_activation", _coerce_overlay_bool),
     "text_appears_instantly": GsmOwnedOverlayField("text_appears_instantly", _coerce_overlay_bool),
+    "adaptive_ocr_retries": GsmOwnedOverlayField("adaptive_ocr_retries", _coerce_overlay_bool),
     "base_scale": GsmOwnedOverlayField("base_scale", lambda v: max(0.5, min(1.0, float(v)))),
     "inject_scanned_lines": GsmOwnedOverlayField("inject_scanned_lines", _coerce_overlay_bool),
     "minimum_character_size": GsmOwnedOverlayField("minimum_character_size", int),
@@ -1714,6 +1786,22 @@ class ProfileConfig:
 
         self.features.full_auto = config_data["features"].get("do_vosk_postprocessing", self.features.full_auto)
         self.features.notify_on_update = config_data["features"].get("notify_on_update", self.features.notify_on_update)
+        self.features.notify_on_audio_generated = config_data["features"].get(
+            "notify_on_audio_generated", self.features.notify_on_update
+        )
+        self.features.notify_on_screenshot_saved = config_data["features"].get(
+            "notify_on_screenshot_saved", self.features.notify_on_screenshot_saved
+        )
+        self.features.notify_on_anki_enhancement_failed = config_data["features"].get(
+            "notify_on_anki_enhancement_failed", self.features.notify_on_anki_enhancement_failed
+        )
+        self.features.notify_on_errors = config_data["features"].get("notify_on_errors", self.features.notify_on_errors)
+        self.features.notify_on_obs_warning = config_data["features"].get(
+            "notify_on_obs_warning", self.features.notify_on_obs_warning
+        )
+        self.features.notify_on_text_intake_state = config_data["features"].get(
+            "notify_on_text_intake_state", self.features.notify_on_text_intake_state
+        )
         self.features.open_anki_edit = config_data["features"].get("open_anki_edit", self.features.open_anki_edit)
 
         self.screenshot.width = config_data["screenshot"].get("width", self.screenshot.width)
@@ -1783,7 +1871,6 @@ class ProfileConfig:
 class StatsConfig:
     session_gap_seconds: int = 1800
     day_rollover_hour: int = 4  # Hour (0-23) when a new day starts for the Today stats card
-    reading_time_adaptive_v2: bool = True  # v2: cap reading time by conservative session median speed
     streak_requirement_hours: float = 0.01  # 1 second required per day to keep your streak by default
     reading_hours_target: int = 1500  # Target reading hours based on TMW N1 achievement data
     character_count_target: int = 25000000  # Target character count (25M) inspired by Discord server milestones
@@ -1795,14 +1882,22 @@ class StatsConfig:
     regex_out_punctuation: bool = True
     regex_out_repetitions: bool = False
     extra_punctuation_regex: str = ""
-    tadoku_username: str = ""
+    tadoku_username: str = ""  # Tadoku email; retain the legacy key for existing configs.
     tadoku_password: str = ""
     tadoku_session_cookie: str = ""
     tadoku_language_code: str = "jpn"
+    tadoku_title_source: str = "english"
     tadoku_daily_sync_enabled: bool = False
     tadoku_daily_sync_time: str = "00:01"
     tadoku_daily_sync_deduplicate: bool = True
     tadoku_daily_sync_game_ids: List[str] = field(default_factory=list)
+    kechimochi_url: str = "http://127.0.0.1:3031"
+    kechimochi_sync_enabled: bool = False
+    kechimochi_sync_schedule: str = "quarter_hourly"
+    kechimochi_sync_time: str = "00:05"
+    kechimochi_include_external_stats: bool = True
+    kechimochi_sync_covers: bool = True
+    kechimochi_adopt_matching_logs: bool = False
     easy_days_settings: Dict[str, int] = field(
         default_factory=lambda: {
             "monday": 100,
@@ -1855,6 +1950,11 @@ class Config:
         anki_data = profile_data.get("anki")
         if not isinstance(anki_data, dict):
             return
+
+        if "update_anki" in anki_data:
+            # Preserve either old switch being off when consolidating Anki integration.
+            legacy_updates_enabled = anki_data.pop("update_anki")
+            anki_data["enabled"] = bool(anki_data.get("enabled", True) and legacy_updates_enabled)
 
         field_specs = {
             "sentence": {
@@ -2251,17 +2351,24 @@ class Config:
             self.sync_shared_field(config.anki, profile.anki, "polling_rate")
             self.sync_shared_field(config.anki, profile.anki, "autoplay_audio")
             self.sync_shared_field(config.anki, profile.anki, "show_update_confirmation_dialog_v2")
+            self.sync_shared_field(config.anki, profile.anki, "skip_confirmation_for_unvoiced")
             self.sync_shared_field(config.anki, profile.anki, "auto_accept_timer")
             self.sync_shared_field(config.anki, profile.anki, "confirmation_always_on_top")
             self.sync_shared_field(config.anki, profile.anki, "confirmation_focus_on_show")
+            self.sync_shared_field(config.anki, profile.anki, "confirmation_audio_step")
             self.sync_shared_field(config.anki, profile.anki, "confirmation_gamepad_enabled")
             self.sync_shared_field(config.anki, profile.anki, "confirmation_gamepad_focus_up")
             self.sync_shared_field(config.anki, profile.anki, "confirmation_gamepad_focus_down")
             self.sync_shared_field(config.anki, profile.anki, "confirmation_gamepad_focus_left")
             self.sync_shared_field(config.anki, profile.anki, "confirmation_gamepad_focus_right")
             self.sync_shared_field(config.anki, profile.anki, "confirmation_gamepad_activate")
+            self.sync_shared_field(config.anki, profile.anki, "confirmation_gamepad_play_audio")
             self.sync_shared_field(config.anki, profile.anki, "confirmation_gamepad_confirm_with_audio")
             self.sync_shared_field(config.anki, profile.anki, "confirmation_gamepad_confirm_without_audio")
+            self.sync_shared_field(config.anki, profile.anki, "confirmation_gamepad_add_previous_line")
+            self.sync_shared_field(config.anki, profile.anki, "confirmation_gamepad_add_next_line")
+            self.sync_shared_field(config.anki, profile.anki, "confirmation_gamepad_expand_audio_start")
+            self.sync_shared_field(config.anki, profile.anki, "confirmation_gamepad_expand_audio_end")
             self.sync_shared_field(config.anki, profile.anki, "replay_audio_on_tts_generation")
             self.sync_shared_field(
                 config.anki,
@@ -2306,6 +2413,9 @@ class Config:
             self.sync_shared_field(config.advanced, profile.advanced, "longest_sleep_time")
             self.sync_shared_field(config.advanced, profile.advanced, "cloud_sync_enabled")
             self.sync_shared_field(config.advanced, profile.advanced, "cloud_sync_auto_sync")
+            self.sync_shared_field(config.advanced, profile.advanced, "cloud_sync_protocol")
+            self.sync_shared_field(config.advanced, profile.advanced, "cloud_sync_key")
+            self.sync_shared_field(config.advanced, profile.advanced, "cloud_sync_settings_groups")
             self.sync_shared_field(config.advanced, profile.advanced, "cloud_sync_api_url")
             self.sync_shared_field(config.advanced, profile.advanced, "cloud_sync_email")
             self.sync_shared_field(config.advanced, profile.advanced, "cloud_sync_api_token")
@@ -2324,6 +2434,8 @@ class Config:
             self.sync_shared_field(config.ai, profile.ai, "gemini_backup_model")
             self.sync_shared_field(config.ai, profile.ai, "groq_api_key")
             self.sync_shared_field(config.ai, profile.ai, "groq_backup_model")
+            self.sync_shared_field(config.ai, profile.ai, "zai_api_key")
+            self.sync_shared_field(config.ai, profile.ai, "zai_backup_model")
             self.sync_shared_field(config.ai, profile.ai, "open_ai_backup_model")
             self.sync_shared_field(config.ai, profile.ai, "ollama_url")
             self.sync_shared_field(config.ai, profile.ai, "ollama_model")
@@ -2455,34 +2567,6 @@ def is_cuda_available():
     return False
 
 
-def get_default_app_directory():
-    """The default %APPDATA%/GameSentenceMiner (Windows) or ~/.config/GameSentenceMiner (mac/Linux)."""
-    if platform == "win32":  # Windows
-        appdata_dir = os.getenv("APPDATA")
-    else:  # macOS and Linux
-        appdata_dir = sanitize_and_resolve_path("~/.config")
-    return os.path.join(appdata_dir, "GameSentenceMiner")
-
-
-def get_app_directory():
-    # Resolution order: GSM_DATA_DIR env (set by Electron) -> pointer file at the default
-    # location -> the default. The pointer file lets a standalone (pip) backend find a
-    # relocated data dir even when Electron isn't around to set the env var.
-    default_dir = get_default_app_directory()
-    config_dir = os.getenv("GSM_DATA_DIR", "").strip()
-    if not config_dir:
-        try:
-            with open(os.path.join(default_dir, "data_dir.json"), "r", encoding="utf-8") as f:
-                config_dir = str(json.load(f).get("dataDir", "")).strip()
-        except (OSError, ValueError):
-            config_dir = ""
-    if not config_dir:
-        config_dir = default_dir
-    # Create the directory if it doesn't exist
-    os.makedirs(config_dir, exist_ok=True)
-    return config_dir
-
-
 # Logging is now handled by GameSentenceMiner.util.logging_config
 # Import at the end of this file to avoid circular dependencies
 
@@ -2539,6 +2623,7 @@ def _remove_deprecated_config_settings(config_data: dict):
     stats = config_data.get("stats")
     if isinstance(stats, dict):
         stats.pop("afk_timer_seconds", None)
+        stats.pop("reading_time_adaptive_v2", None)
 
     def _remove_from_profile(profile_data: dict):
         if not isinstance(profile_data, dict):
@@ -2587,11 +2672,12 @@ def load_config():
                         config_file = json.load(file)
                     config_file = _remove_legacy_hotkeys(config_file)
                     config_file = _remove_deprecated_config_settings(config_file)
+                    Config._migrate_anki_profile_data(config_file)
 
                     config = ProfileConfig.from_dict(config_file)
                     new_config = Config(configs={DEFAULT_CONFIG: config}, current_profile=DEFAULT_CONFIG)
 
-                    config.save()
+                    new_config.save()
                     return new_config
         except json.JSONDecodeError as e:
             logger.error(f"Error parsing config.json, saving backup and returning new config: {e}")
@@ -2739,6 +2825,8 @@ class GsmAppState:
         self.lines_for_media_creation = None
         self.previous_lines_for_media_creation = None
         self.media_creation_request = {}
+        # Save clip for later: queued lines, one per saved OBS replay.
+        self.pending_clip_saves = []
         self.videos_with_pending_operations = set()  # Track videos that shouldn't be deleted yet
         self.disable_anki_confirmation_session = False
         self.replay_buffer_stopped_timestamp = None
@@ -2755,6 +2843,8 @@ class AnkiUpdateResult:
     audio_in_anki: str = ""
     screenshot_in_anki: str = ""
     prev_screenshot_in_anki: str = ""
+    screenshot_media_in_anki: List[str] = field(default_factory=list)
+    prev_screenshot_media_in_anki: List[str] = field(default_factory=list)
     sentence_in_anki: str = ""
     multi_line: bool = False
     video_in_anki: str = ""
@@ -2872,9 +2962,3 @@ ffmpeg_base_command_list_info = [
 ]
 
 add_gpu_dlls_to_path()
-
-# Clean up old logs on module load
-try:
-    cleanup_old_logs()
-except Exception as e:
-    logger.warning(f"Error during log cleanup: {e}")

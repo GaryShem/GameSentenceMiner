@@ -1,9 +1,10 @@
 """
 Statistics Calculation Module
 
-Pure computation functions for reading statistics. These functions operate on
+Calculation functions for reading statistics. These functions operate on
 lists of GameLinesTable records or pre-aggregated data and return plain dicts /
-values.  They have **no** Flask dependency and can be called from API handlers,
+values. Reading-time calculations also load saved pause boundaries unless the
+caller supplies them. They have **no** Flask dependency and can be called from API handlers,
 cron jobs, or tests.
 
 Functions that deal with *rollup aggregation* (combining daily snapshots with
@@ -14,25 +15,21 @@ from __future__ import annotations
 
 import datetime
 from collections import defaultdict
+from math import isfinite
 from typing import Dict, Sequence, Tuple
 
+from GameSentenceMiner.native.text import count_kanji
 from GameSentenceMiner.util.config.configuration import (
     get_stats_config,
     logger,
 )
 from GameSentenceMiner.util.jiten_difficulty import get_jiten_difficulty_label
 from GameSentenceMiner.util.stats.stats_util import (
+    gap_crosses_reading_break,
     has_cards,
-    adaptive_cap_seconds,
-    session_median_cps,
-    MAX_SEC_PER_CHAR as _MAX_SEC_PER_CHAR,
-    FLOOR_SECONDS as _FLOOR_SECONDS,
-    ABSOLUTE_CEILING as _ABSOLUTE_CEILING,
-    MIN_CHARS_FOR_SPEED as _MIN_CHARS_FOR_SPEED,
-    MIN_SAMPLES_FOR_IQR as _MIN_SAMPLES_FOR_IQR,
+    session_reading_seconds,
 )
-from GameSentenceMiner.util.text_utils import is_kanji
-
+from GameSentenceMiner.util.text_utils import is_kanji as is_kanji  # noqa: PLC0414 - public compatibility re-export
 
 # ---------------------------------------------------------------------------
 # Lazy import helper
@@ -85,18 +82,32 @@ def build_game_display_name_mapping(all_lines) -> Dict[str, str]:
 def calculate_kanji_frequency(all_lines) -> Dict:
     """Calculate frequency of kanji characters across all lines with gradient colouring."""
     kanji_count: Dict[str, int] = defaultdict(int)
+    pending_texts: list[str] = []
+
+    def flush_texts():
+        if pending_texts:
+            for char, count in count_kanji(pending_texts).items():
+                kanji_count[char] += count
+            pending_texts.clear()
 
     for line in all_lines:
+        if hasattr(line, "archived_kanji"):
+            # Flush before archived counts to preserve first-seen tie ordering.
+            flush_texts()
+            for char, count in line.archived_kanji.items():
+                kanji_count[char] += count
+            continue
         if line.line_text:
             try:
                 line_text = str(line.line_text) if line.line_text else ""
-                for char in line_text:
-                    if is_kanji(char):
-                        kanji_count[char] += 1
+                pending_texts.append(line_text)
+                if len(pending_texts) >= 1024:
+                    flush_texts()
             except Exception as e:
                 logger.warning(f"Error processing line text for kanji frequency: {repr(line.line_text)}, error: {e}")
                 continue
 
+    flush_texts()
     if not kanji_count:
         return {"kanji_data": [], "unique_count": 0}
 
@@ -345,77 +356,54 @@ def calculate_reading_speed_heatmap_data(
 def calculate_actual_reading_time(
     timestamps: Sequence[float],
     line_texts: Sequence[str],
+    *,
+    reading_breaks: Sequence[float] | None = None,
 ) -> float:
-    """Calculate actual reading time with adaptive AFK detection.
+    """Estimate reading time with a separate median pace for each session.
 
-    Two algorithms, selected by ``stats.reading_time_adaptive_v2``:
+    Cap each line at 2.5 times its expected duration at that session's actual
+    median speed, using the same sample filters as the live tracker. Gaps over
+    the configured session break are neither credited nor used to learn pace.
+    The final line in each session has no observed duration and gets no credit.
 
-    v1 (legacy, default)
-        Stage 1 caps each line at a fixed seconds-per-char; Stage 2 replaces
-        below-whisker (IQR) slow outliers with a median-speed estimate.
-
-    v2 (adaptive)
-        Caps each line at what it *should* take at a conservative version of
-        the session's own median reading speed (shared with the live tracker),
-        with a small floor.
+    Batch and live stats recalculate all measured gaps at the current median.
+    Gaps spanning an explicit pause are neither credited nor used to learn pace.
+    Unless supplied, pause boundaries are read from the stats database.
+    Callers supply the same cleaned text used for their character totals.
 
     Returns:
-        Actual reading time in seconds.
+        Estimated reading time in seconds.
     """
     if not timestamps or len(timestamps) < 2:
         return 0.0
 
-    sorted_pairs = sorted(zip(timestamps, line_texts), key=lambda p: p[0])
+    sorted_pairs = sorted(
+        ((timestamp, text) for timestamp, text in zip(timestamps, line_texts) if isfinite(timestamp)),
+        key=lambda p: p[0],
+    )
+    if len(sorted_pairs) < 2:
+        return 0.0
+    if reading_breaks is None:
+        from GameSentenceMiner.util.database.reading_breaks_table import ReadingBreaksTable
+
+        reading_breaks = ReadingBreaksTable.between(sorted_pairs[0][0], sorted_pairs[-1][0])
+    reading_breaks = sorted(reading_breaks)
+    session_gap = get_stats_config().session_gap_seconds
     raw_gaps: list[tuple[float, int]] = []
+    total_seconds = 0.0
+
     for i in range(len(sorted_pairs) - 1):
         raw_gap = sorted_pairs[i + 1][0] - sorted_pairs[i][0]
+        if raw_gap > session_gap:
+            total_seconds += session_reading_seconds(raw_gaps)
+            raw_gaps.clear()
+            continue
+        if gap_crosses_reading_break(sorted_pairs[i][0], sorted_pairs[i + 1][0], reading_breaks):
+            continue
         char_count = len(sorted_pairs[i][1] or "")
         raw_gaps.append((raw_gap, char_count))
 
-    if get_stats_config().reading_time_adaptive_v2:
-        return _reading_time_adaptive(raw_gaps)
-    return _reading_time_legacy(raw_gaps)
-
-
-def _reading_time_legacy(raw_gaps: Sequence[tuple[float, int]]) -> float:
-    """v1: fixed per-char cap (Stage 1) + IQR slow-outlier replacement (Stage 2)."""
-    # --- Stage 1: per-line cap ---
-    gaps: list[list] = []
-    for raw_gap, char_count in raw_gaps:
-        max_time = max(_FLOOR_SECONDS, char_count * _MAX_SEC_PER_CHAR)
-        max_time = min(max_time, _ABSOLUTE_CEILING)
-        gaps.append([min(raw_gap, max_time), char_count])
-
-    # --- Stage 2: IQR outlier filtering ---
-    speeds: list[float] = []
-    speed_indices: list[int] = []
-    for i, (gap, char_count) in enumerate(gaps):
-        if char_count >= _MIN_CHARS_FOR_SPEED and gap > 0:
-            speeds.append(char_count / gap)
-            speed_indices.append(i)
-
-    if len(speeds) >= _MIN_SAMPLES_FOR_IQR:
-        sorted_speeds = sorted(speeds)
-        n = len(sorted_speeds)
-        q1 = sorted_speeds[n // 4]
-        q3 = sorted_speeds[3 * n // 4]
-        iqr = q3 - q1
-        lower_bound = q1 - 1.5 * iqr
-        median_speed = sorted_speeds[n // 2]
-
-        if median_speed > 0:
-            for j, idx in enumerate(speed_indices):
-                if speeds[j] < lower_bound:
-                    char_count = gaps[idx][1]
-                    gaps[idx][0] = char_count / median_speed
-
-    return sum(gap for gap, _ in gaps)
-
-
-def _reading_time_adaptive(raw_gaps: Sequence[tuple[float, int]]) -> float:
-    """v2: cap each line by a conservative session-median reading speed."""
-    median_cps = session_median_cps(raw_gaps)
-    return sum(min(raw_gap, adaptive_cap_seconds(char_count, median_cps)) for raw_gap, char_count in raw_gaps)
+    return total_seconds + session_reading_seconds(raw_gaps)
 
 
 # ---------------------------------------------------------------------------

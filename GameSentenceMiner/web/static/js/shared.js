@@ -229,7 +229,6 @@ function syncStatsConfigFromSettings(settings) {
         games_target_date: 'gamesTargetDate',
         regex_out_punctuation: 'regexOutPunctuation',
         regex_out_repetitions: 'regexOutRepetitions',
-        reading_time_adaptive_v2: 'readingTimeAdaptiveV2',
         extra_punctuation_regex: 'extraPunctuationRegex',
     };
 
@@ -274,12 +273,12 @@ class SettingsManager {
         this.gamesTargetDateInput = document.getElementById('gamesTargetDate');
         this.regexOutPunctuationInput = document.getElementById('regex_out_punctuation');
         this.regexOutRepetitionsInput = document.getElementById('regex_out_repetitions');
-        this.readingTimeAdaptiveV2Input = document.getElementById('reading_time_adaptive_v2');
         this.extraPunctuationRegexInput = document.getElementById('extra_punctuation_regex');
         this.tadokuUsernameInput = document.getElementById('tadoku_username');
         this.tadokuPasswordInput = document.getElementById('tadoku_password');
         this.tadokuClearCredentialsInput = document.getElementById('tadoku_clear_credentials');
         this.tadokuLanguageCodeInput = document.getElementById('tadoku_language_code');
+        this.tadokuTitleSourceInput = document.getElementById('tadoku_title_source');
         this.tadokuDailySyncEnabledInput = document.getElementById('tadoku_daily_sync_enabled');
         this.tadokuDailySyncTimeInput = document.getElementById('tadoku_daily_sync_time');
         this.tadokuDailySyncDeduplicateInput = document.getElementById('tadoku_daily_sync_deduplicate');
@@ -298,6 +297,8 @@ class SettingsManager {
         this.tadokuSettingsSuccess = document.getElementById('tadokuSettingsSuccess');
         this.tadokuConfigured = false;
         this.tadokuWhitelistSelectedGameIds = new Set();
+        this.tadokuLogDescriptions = new Map();
+        this.tadokuSyncInProgress = false;
     }
     
     attachEventListeners() {
@@ -332,6 +333,12 @@ class SettingsManager {
         }
         if (this.tadokuManualSyncDeduplicateInput) {
             this.tadokuManualSyncDeduplicateInput.addEventListener('change', () => this.loadTadokuPreview());
+        }
+        if (this.tadokuTitleSourceInput) {
+            this.tadokuTitleSourceInput.addEventListener('change', () => {
+                this.clearTadokuMessages();
+                this.loadTadokuPreview();
+            });
         }
         if (this.tadokuWhitelistSelectAllBtn) {
             this.tadokuWhitelistSelectAllBtn.addEventListener('click', () => {
@@ -454,9 +461,6 @@ class SettingsManager {
         if (this.regexOutRepetitionsInput) {
             this.regexOutRepetitionsInput.checked = settings.regex_out_repetitions;
         }
-        if (this.readingTimeAdaptiveV2Input) {
-            this.readingTimeAdaptiveV2Input.checked = settings.reading_time_adaptive_v2;
-        }
         if (this.extraPunctuationRegexInput) {
             this.extraPunctuationRegexInput.value = settings.extra_punctuation_regex || '';
         }
@@ -553,10 +557,6 @@ class SettingsManager {
                 settings.regex_out_repetitions = this.regexOutRepetitionsInput.checked;
             }
 
-            if (this.readingTimeAdaptiveV2Input) {
-                settings.reading_time_adaptive_v2 = this.readingTimeAdaptiveV2Input.checked;
-            }
-
             if (this.extraPunctuationRegexInput) {
                 settings.extra_punctuation_regex = this.extraPunctuationRegexInput.value.trim();
             }
@@ -622,6 +622,7 @@ class SettingsManager {
             const settings = {
                 tadoku_clear_credentials: clearCredentials,
                 tadoku_language_code: languageCode,
+                tadoku_title_source: this.tadokuTitleSourceInput?.value || 'english',
                 tadoku_daily_sync_enabled: Boolean(this.tadokuDailySyncEnabledInput?.checked),
                 tadoku_daily_sync_time: this.tadokuDailySyncTimeInput?.value || '00:01',
                 tadoku_daily_sync_deduplicate: Boolean(this.tadokuDailySyncDeduplicateInput?.checked),
@@ -698,6 +699,9 @@ class SettingsManager {
         }
         if (this.tadokuLanguageCodeInput) {
             this.tadokuLanguageCodeInput.value = settings.tadoku_language_code || 'jpn';
+        }
+        if (this.tadokuTitleSourceInput) {
+            this.tadokuTitleSourceInput.value = settings.tadoku_title_source || 'english';
         }
         if (this.tadokuDailySyncEnabledInput) {
             this.tadokuDailySyncEnabledInput.checked = Boolean(settings.tadoku_daily_sync_enabled);
@@ -817,7 +821,8 @@ class SettingsManager {
             this.tadokuSyncBtn.disabled = true;
         }
         try {
-            const response = await fetch(`/api/tadoku/preview?deduplicate=${deduplicate}`);
+            const titleSource = this.tadokuTitleSourceInput?.value || 'english';
+            const response = await fetch(`/api/tadoku/preview?deduplicate=${deduplicate}&title_source=${encodeURIComponent(titleSource)}`);
             const preview = await response.json();
             if (!response.ok) {
                 throw new Error(preview.error || 'Failed to load Tadoku preview');
@@ -831,10 +836,35 @@ class SettingsManager {
                 const row = document.createElement('tr');
                 [entry.game_name, entry.lines.toLocaleString(), entry.characters.toLocaleString()].forEach((value, index) => {
                     const cell = document.createElement('td');
-                    cell.textContent = value;
                     cell.style.padding = '6px';
                     cell.style.borderBottom = '1px solid var(--border-color)';
-                    if (index > 0) {
+                    if (index === 0) {
+                        const input = document.createElement('textarea');
+                        const defaultTitle = Array.from(entry.game_name).slice(0, 255).join('');
+                        input.rows = 3;
+                        input.className = 'form-input';
+                        input.required = true;
+                        input.maxLength = 255;
+                        input.style.width = '100%';
+                        input.style.minWidth = '0';
+                        input.style.boxSizing = 'border-box';
+                        input.style.resize = 'vertical';
+                        input.style.font = 'inherit';
+                        input.dataset.gameKey = entry.game_key;
+                        input.setAttribute('aria-label', `Tadoku log title for ${entry.game_name}`);
+                        input.setAttribute('aria-describedby', 'tadokuLogTitleHelp');
+                        input.value = this.tadokuLogDescriptions.get(entry.game_key) ?? defaultTitle;
+                        input.addEventListener('input', () => {
+                            if (input.value === defaultTitle) {
+                                this.tadokuLogDescriptions.delete(entry.game_key);
+                            } else {
+                                this.tadokuLogDescriptions.set(entry.game_key, input.value);
+                            }
+                            this.clearTadokuMessages();
+                        });
+                        cell.appendChild(input);
+                    } else {
+                        cell.textContent = value;
                         cell.style.textAlign = 'right';
                     }
                     row.appendChild(cell);
@@ -844,42 +874,68 @@ class SettingsManager {
             if (this.tadokuSyncBtn) {
                 const hasWork = preview.total_entries > 0
                     || (deduplicate && preview.duplicates_excluded > 0);
-                this.tadokuSyncBtn.disabled = !hasWork
+                this.tadokuSyncBtn.disabled = this.tadokuSyncInProgress || !hasWork
                     || (!this.tadokuConfigured && preview.total_entries > 0);
                 this.tadokuSyncBtn.title = !this.tadokuConfigured && preview.total_entries > 0
-                    ? 'Save a Tadoku session cookie before syncing'
+                    ? 'Save a Tadoku email and password before syncing'
                     : '';
             }
+            return preview;
         } catch (error) {
             this.tadokuPreviewSummary.textContent = error.message || 'Failed to load Tadoku preview';
             this.showTadokuError(error.message || 'Failed to load Tadoku preview');
+            return null;
         }
     }
 
     async queueTadokuSync() {
-        const deduplicate = Boolean(this.tadokuManualSyncDeduplicateInput?.checked);
-        await this.loadTadokuPreview();
-        if (!window.confirm('Send the previewed per-game character totals to Tadoku?')) {
+        if (this.tadokuSyncInProgress) {
             return;
         }
-        if (this.tadokuSyncBtn) {
-            this.tadokuSyncBtn.disabled = true;
-            this.tadokuSyncBtn.textContent = 'Queueing…';
-        }
+        this.tadokuSyncInProgress = true;
+        this.clearTadokuMessages();
+        const deduplicate = Boolean(this.tadokuManualSyncDeduplicateInput?.checked);
+        const controls = [this.tadokuPreviewBtn, this.tadokuManualSyncDeduplicateInput, this.tadokuTitleSourceInput].filter(Boolean);
+        controls.forEach(control => { control.disabled = true; });
         try {
+            const preview = await this.loadTadokuPreview();
+            if (!preview || (!preview.total_entries && !(deduplicate && preview.duplicates_excluded))
+                || (!this.tadokuConfigured && preview.total_entries > 0)) {
+                return;
+            }
+            const inputs = Array.from(this.tadokuPreviewRows.querySelectorAll('textarea[data-game-key]'));
+            const logDescriptions = {};
+            for (const input of inputs) {
+                const title = input.value.trim();
+                if (!title || Array.from(title).length > 255) {
+                    this.showTadokuError('Each Tadoku log title must contain between 1 and 255 characters.');
+                    return;
+                }
+                logDescriptions[input.dataset.gameKey] = title;
+            }
+            if (!window.confirm('Send the previewed log titles and per-game character totals to Tadoku?')) {
+                return;
+            }
+            inputs.forEach(input => { input.disabled = true; });
+            if (this.tadokuSyncBtn) {
+                this.tadokuSyncBtn.textContent = 'Queueing…';
+            }
             const response = await fetch('/api/tadoku/sync', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({deduplicate}),
+                body: JSON.stringify({deduplicate, log_descriptions: logDescriptions}),
             });
             const job = await response.json();
             if (!response.ok) {
                 throw new Error(job.error || 'Failed to queue Tadoku sync');
             }
             await this.pollTadokuJob(job.job_id);
+            this.tadokuLogDescriptions.clear();
         } catch (error) {
             this.showTadokuError(error.message || 'Tadoku sync failed');
         } finally {
+            this.tadokuSyncInProgress = false;
+            controls.forEach(control => { control.disabled = false; });
             if (this.tadokuSyncBtn) {
                 this.tadokuSyncBtn.textContent = 'Queue manual sync';
             }

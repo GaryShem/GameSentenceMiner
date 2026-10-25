@@ -1,4 +1,4 @@
-import {exec, execFile} from 'child_process';
+import {execFile} from 'child_process';
 import {BrowserWindow, ipcMain, dialog} from 'electron';
 import { getAssetsDir, getPidByProcessName, getSecureWebPreferences } from '../util.js';
 import {isQuitting, mainWindow} from '../main.js';
@@ -41,14 +41,15 @@ export interface SteamGame {
 function launchSteamGame(gameIdOrExecutable: number | string): number | null {
     try {
         if (typeof gameIdOrExecutable === 'number') {
-            let process = execFile(getSteamPath(), ['-applaunch', gameIdOrExecutable.toString()]);
+            let process = execFile(getSteamPath(), ['-applaunch', gameIdOrExecutable.toString()], (error) => {
+                if (error) console.error('Error launching Steam game:', error);
+            });
             return process.pid ?? null;
         } else {
             const executableDir = path.dirname(gameIdOrExecutable);
-            let process = execFile(gameIdOrExecutable, [], { cwd: executableDir });
-            if (!process.pid) {
-                process = exec(gameIdOrExecutable, { cwd: executableDir });
-            }
+            let process = execFile(gameIdOrExecutable, [], { cwd: executableDir }, (error) => {
+                if (error) console.error('Error launching game executable:', error);
+            });
             return process.pid ?? null;
         }
     } catch (error) {
@@ -66,7 +67,7 @@ function runAgentScript(name: string, steamPid: number, gameScript: string) {
 
     const command = `"${getAgentPath()}" --script="${gameScript}" --pname=${steamPid}`;
     console.log(command);
-    exec(command, { windowsHide: getLaunchAgentMinimized() }, (error) => {
+    execFile(getAgentPath(), [`--script=${gameScript}`, `--pname=${steamPid}`], { windowsHide: getLaunchAgentMinimized() }, (error) => {
         if (error) {
             console.error(`Error running agent script:`, error);
         }
@@ -124,6 +125,8 @@ export function openSteamWindow() {
     steamWindow = new BrowserWindow({
         width: 1000,
         height: 800,
+        minWidth: 800,
+        minHeight: 500,
         webPreferences: getSecureWebPreferences(),
     });
 
@@ -268,6 +271,8 @@ export function registerSteamIPC() {
             gameConfigWindow = new BrowserWindow({
                 width: 1280,
                 height: 1000,
+                minWidth: 800,
+                minHeight: 500,
                 parent: mainWindow,
                 modal: true,
                 webPreferences: getSecureWebPreferences(),

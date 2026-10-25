@@ -8,6 +8,7 @@ import textwrap
 import threading
 import time
 import webbrowser
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import flask
@@ -15,14 +16,18 @@ from flask import jsonify, render_template, request, send_file, send_from_direct
 from waitress import create_server
 
 from GameSentenceMiner import obs
-from GameSentenceMiner.ai.ai_prompting import get_ai_prompt_result
+from GameSentenceMiner.ai.ai_prompting import get_ai_prompt_result, get_sentence_analysis
+from GameSentenceMiner.ai.prompts.presets import STUDY_TASKS
+from GameSentenceMiner.ai.setup import AI_SETUP_DOCS_URL, ai_setup_required, ai_error_message, open_ai_settings
 from GameSentenceMiner.obs import get_current_game
+from GameSentenceMiner.util.concurrency.work_pool import submit_background_work
 from GameSentenceMiner.util.config.configuration import (
     get_config,
     gsm_state,
     gsm_status,
     logger,
 )
+from GameSentenceMiner.util.elevation import is_windows_admin
 from GameSentenceMiner.util.gsm_utils import TEXT_REPLACEMENTS_FILE
 from GameSentenceMiner.util.text_log import get_all_lines, get_line_by_id
 
@@ -47,13 +52,15 @@ from GameSentenceMiner.web.websocket_proxy import build_upstream_websocket_heade
 # If the runtime's OpenSSL configuration is incompatible, keep that failure
 # contained and let the normal Waitress listener continue below.
 try:
-    from aiohttp import ClientSession, ClientTimeout, TCPConnector, WSMsgType, web
+    from aiohttp import ClientSession, ClientTimeout, ClientWSTimeout, TCPConnector, WSCloseCode, WSMsgType, web
 
     _AIOHTTP_IMPORT_ERROR = None
 except Exception as error:  # pragma: no cover - depends on the host OpenSSL build  # noqa: BLE001
     ClientSession = None
     ClientTimeout = None
+    ClientWSTimeout = None
     TCPConnector = None
+    WSCloseCode = None
     WSMsgType = None
     web = None
     _AIOHTTP_IMPORT_ERROR = error
@@ -64,11 +71,12 @@ _legacy_notice_thread = None
 _single_port_gateway_active = False
 _single_port_gateway_port = None
 _single_port_gateway_future = None
+_single_port_gateway_stop = None
 _waitress_servers = []
 _waitress_threads = []
 _waitress_lock = threading.RLock()
 _ws_invalid_upgrade_filter_installed = False
-AI_TRANSLATION_SETUP_DOCS_URL = "https://docs.gamesentenceminer.com/docs/guides/ai-features"
+AI_TRANSLATION_SETUP_DOCS_URL = AI_SETUP_DOCS_URL
 
 app = flask.Flask(__name__, static_folder="static", static_url_path="/static")
 
@@ -170,7 +178,7 @@ def _find_free_port(bind_host: str) -> int:
         return int(sock.getsockname()[1])
 
 
-def _run_waitress_server(host: str, bind_port: int):
+def _run_waitress_server(host: str, bind_port: int, *, on_ready: Callable[[], None] | None = None):
     server = None
     try:
         server = create_server(
@@ -182,6 +190,10 @@ def _run_waitress_server(host: str, bind_port: int):
         )
         with _waitress_lock:
             _waitress_servers.append(server)
+        # create_server has bound and activated the listener; requests can now
+        # queue while run() starts processing them.
+        if on_ready is not None:
+            on_ready()
         server.run()
     except Exception as waitress_error:
         logger.error(f"Internal waitress server crashed on {host}:{bind_port}: {waitress_error}")
@@ -204,7 +216,9 @@ def _wait_for_tcp_port(host: str, bind_port: int, timeout_seconds: float = 6.0) 
     return False
 
 
-def _try_start_single_port_gateway(host: str, external_port: int) -> bool:
+def _try_start_single_port_gateway(
+    host: str, external_port: int, *, on_ready: Callable[[], None] | None = None
+) -> bool:
     """
     Single-port mode:
       - Keep waitress and the websocket manager as-is on their internal ports.
@@ -403,9 +417,13 @@ def _try_start_single_port_gateway(host: str, external_port: int) -> bool:
             if not _is_expected_ws_proxy_close_error(pipe_error):
                 raise
 
+    gateway_websockets = set()
+    gateway_stopping = False
+
     async def proxy_websocket_request(client: ClientSession, incoming_request):
-        outgoing_ws = web.WebSocketResponse(heartbeat=20)
+        outgoing_ws = web.WebSocketResponse(heartbeat=20, timeout=1.0)
         await outgoing_ws.prepare(incoming_request)
+        gateway_websockets.add(outgoing_ws)
 
         ws_target = f"ws://{upstream_host}:{ingress_ws_port}{incoming_request.rel_url}"
         forward_headers = build_upstream_websocket_headers(
@@ -415,6 +433,8 @@ def _try_start_single_port_gateway(host: str, external_port: int) -> bool:
         )
 
         try:
+            if gateway_stopping:
+                return outgoing_ws
             async with client.ws_connect(
                 ws_target,
                 headers=forward_headers,
@@ -422,18 +442,24 @@ def _try_start_single_port_gateway(host: str, external_port: int) -> bool:
                 autoping=True,
                 compress=0,
                 max_msg_size=0,
+                timeout=ClientWSTimeout(ws_close=1.0),
             ) as upstream_ws:
                 relay_tasks = {
                     asyncio.create_task(pipe_client_to_upstream(outgoing_ws, upstream_ws)),
                     asyncio.create_task(pipe_upstream_to_client(upstream_ws, outgoing_ws)),
                 }
-                done, pending = await asyncio.wait(
-                    relay_tasks,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for task in pending:
-                    task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
+                try:
+                    done, _pending = await asyncio.wait(
+                        relay_tasks,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    # A cancelled request still owns both relay tasks. Drain them
+                    # before closing either socket or stopping the shared loop.
+                    for task in relay_tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*relay_tasks, return_exceptions=True)
                 for task in done:
                     if task.cancelled():
                         continue
@@ -446,13 +472,18 @@ def _try_start_single_port_gateway(host: str, external_port: int) -> bool:
             else:
                 logger.warning(f"Single-port websocket proxy error for {incoming_request.rel_url}: {proxy_error}")
         finally:
-            await outgoing_ws.close()
+            try:
+                await outgoing_ws.close()
+            finally:
+                gateway_websockets.discard(outgoing_ws)
 
         return outgoing_ws
 
     client_session = None
 
     async def gateway_router(incoming_request):
+        if gateway_stopping:
+            raise web.HTTPServiceUnavailable()
         connection_header = incoming_request.headers.get("Connection", "")
         upgrade_header = incoming_request.headers.get("Upgrade", "")
         is_upgrade = "upgrade" in connection_header.lower() and upgrade_header.lower() == "websocket"
@@ -461,34 +492,53 @@ def _try_start_single_port_gateway(host: str, external_port: int) -> bool:
         return await proxy_http_request(client_session, incoming_request)
 
     async def gateway_main():
-        global _single_port_gateway_active, _single_port_gateway_port
-        nonlocal client_session
+        global _single_port_gateway_active, _single_port_gateway_port, _single_port_gateway_stop
+        nonlocal client_session, gateway_stopping
+        loop = asyncio.get_running_loop()
+        stop_event = asyncio.Event()
+        _single_port_gateway_stop = lambda: loop.call_soon_threadsafe(stop_event.set)
         app_gateway = web.Application(client_max_size=64 * 1024 * 1024)
         app_gateway.router.add_route("*", "/{tail:.*}", gateway_router)
 
-        runner = web.AppRunner(app_gateway, access_log=None)
-        await runner.setup()
-        site = web.TCPSite(runner, host=host, port=external_port)
-        timeout = ClientTimeout(total=None, sock_connect=5, sock_read=None)
-        connector = TCPConnector(force_close=True, enable_cleanup_closed=True)
-        # Preserve upstream encoding bytes (gzip/br) so browser decoding remains valid.
-        client_session = ClientSession(
-            timeout=timeout,
-            connector=connector,
-            auto_decompress=False,
-        )
-        await site.start()
+        async def close_websockets(_app):
+            nonlocal gateway_stopping
+            gateway_stopping = True
+            # AppRunner stops accepting connections before invoking on_shutdown.
+            # Closing the clients lets the request handlers drain their relays.
+            await asyncio.gather(
+                *(ws.close(code=WSCloseCode.GOING_AWAY, drain=False) for ws in list(gateway_websockets)),
+                return_exceptions=True,
+            )
 
-        _single_port_gateway_active = True
-        _single_port_gateway_port = external_port
-
+        app_gateway.on_shutdown.append(close_websockets)
+        runner = web.AppRunner(app_gateway, access_log=None, shutdown_timeout=2.0)
         try:
-            await asyncio.Event().wait()
+            await runner.setup()
+            site = web.TCPSite(runner, host=host, port=external_port)
+            timeout = ClientTimeout(total=None, sock_connect=5, sock_read=None)
+            connector = TCPConnector(force_close=True, enable_cleanup_closed=True)
+            # Preserve upstream encoding bytes (gzip/br) so browser decoding remains valid.
+            client_session = ClientSession(
+                timeout=timeout,
+                connector=connector,
+                auto_decompress=False,
+            )
+            await site.start()
+            _single_port_gateway_active = True
+            _single_port_gateway_port = external_port
+            if on_ready is not None:
+                on_ready()
+            await stop_event.wait()
         finally:
             _single_port_gateway_active = False
             _single_port_gateway_port = None
-            await client_session.close()
-            await runner.cleanup()
+            try:
+                # Keep the upstream session alive until all request handlers exit.
+                await runner.cleanup()
+            finally:
+                if client_session is not None:
+                    await client_session.close()
+                _single_port_gateway_stop = None
 
     try:
         transport_runtime = getattr(websocket_manager, "_transport_runtime", None)
@@ -501,7 +551,8 @@ def _try_start_single_port_gateway(host: str, external_port: int) -> bool:
                 if _single_port_gateway_future.done():
                     _single_port_gateway_future.result()
                 time.sleep(0.02)
-            _single_port_gateway_future.cancel()
+            if _single_port_gateway_stop is not None:
+                _single_port_gateway_stop()
             raise TimeoutError("Single-port gateway did not become ready")
         if os.name == "nt":
             # aiohttp + Proactor on Windows can surface noisy connection reset callbacks.
@@ -972,7 +1023,7 @@ def get_screenshot():
 
         handle_texthooker_button(gsm_state.previous_replay)
     else:
-        obs.save_replay_buffer()
+        _save_replay_for([line])
     return jsonify({}), 200
 
 
@@ -1037,7 +1088,7 @@ def play_audio():
     ):
         handle_texthooker_button(gsm_state.previous_replay)
     else:
-        obs.save_replay_buffer()
+        _save_replay_for([line])
     return jsonify({"queued": True, "line_id": event_id}), 200
 
 
@@ -1074,9 +1125,39 @@ def trim_video():
     ):
         handle_texthooker_button(gsm_state.previous_replay)
     else:
-        obs.save_replay_buffer()
+        _save_replay_for([line])
 
     return jsonify({"queued": True, "line_id": event_id}), 200
+
+
+def _save_replay_for(lines):
+    """Run the queued Text Feed action on a saved clip once lines left the buffer, else save an OBS replay."""
+    from GameSentenceMiner import clip_cards
+    from GameSentenceMiner.web.service import handle_texthooker_button
+
+    if clip_replay := clip_cards.replay_for_lines(lines):
+        handle_texthooker_button(clip_replay)
+    else:
+        obs.save_replay_buffer()
+
+
+def _missing_output_folder_response():
+    """No destination configured: open the settings to the Paths tab so the user can set one."""
+    try:
+        settings_window = gsm_state.config_app
+        if settings_window is None:
+            factory = getattr(gsm_state, "config_app_factory", None)
+            settings_window = factory() if callable(factory) else None
+        if settings_window:
+            settings_window.show_window(root_tab_key="general", subtab_key="paths")
+    except Exception as e:
+        logger.debug(f"Failed to open settings for output folder: {e}")
+    return jsonify(
+        {
+            "error": ("No output folder is set. Set an Output Folder in the Paths settings, then try again."),
+            "open_settings": True,
+        }
+    ), 400
 
 
 @app.route("/create-media", methods=["POST"])
@@ -1088,22 +1169,7 @@ def create_media():
     trim_with_vad = bool(data.get("trim_with_vad", False))
 
     if not get_config().paths.output_folder:
-        # No destination configured: open the settings to the Paths tab so the user can set one.
-        try:
-            settings_window = gsm_state.config_app
-            if settings_window is None:
-                factory = getattr(gsm_state, "config_app_factory", None)
-                settings_window = factory() if callable(factory) else None
-            if settings_window:
-                settings_window.show_window(root_tab_key="general", subtab_key="paths")
-        except Exception as e:
-            logger.debug(f"Failed to open settings for output folder: {e}")
-        return jsonify(
-            {
-                "error": ("No output folder is set. Set an Output Folder in the Paths settings, then try again."),
-                "open_settings": True,
-            }
-        ), 400
+        return _missing_output_folder_response()
 
     lines = [line for event_id in ids if (line := get_event_line_by_id(event_id)) is not None]
     if not lines:
@@ -1136,9 +1202,65 @@ def create_media():
     if reuse_replay:
         handle_texthooker_button(gsm_state.previous_replay)
     else:
-        obs.save_replay_buffer()
+        _save_replay_for(lines)
 
     return jsonify({"queued": True, "count": len(lines)}), 200
+
+
+def _queue_clip_save(line, wait_seconds):
+    """Save an OBS replay once it covers the line; the replay handler writes the clip."""
+    from GameSentenceMiner.util import clips
+
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+
+    def schedule(delay):
+        timer = threading.Timer(min(max(0.0, delay), 0.5), run)
+        timer.daemon = True
+        timer.start()
+
+    def run():
+        remaining = min(deadline - time.monotonic(), clips.seconds_until_clip_ready(line))
+        if remaining > 0:
+            schedule(remaining)
+            return
+        gsm_state.pending_clip_saves.append(line)
+        try:
+            obs.save_replay_buffer()
+        except Exception as e:
+            logger.exception(f"Failed to save OBS replay for Save clip for later: {e}")
+            if line in gsm_state.pending_clip_saves:
+                gsm_state.pending_clip_saves.remove(line)
+            from GameSentenceMiner.web.service import _send_texthooker_audio_event
+
+            _send_texthooker_audio_event(
+                "clip_save_failed", line_ids=[line.id], error=f"Could not save the OBS replay: {e}"
+            )
+
+    schedule(wait_seconds)
+
+
+@app.route("/save-clip", methods=["POST"])
+def save_clip():
+    """Keep the line as an OBS-shaped clip plus manifest, so a card can be made from it later."""
+    from GameSentenceMiner.util import clips
+
+    event_id = (request.get_json() or {}).get("id")
+    if not event_id:
+        return jsonify({"error": "Missing id"}), 400
+    if not get_config().paths.output_folder:
+        return _missing_output_folder_response()
+
+    line = get_event_line_by_id(event_id)
+    if line is None:
+        return jsonify({"error": "Invalid id"}), 400
+
+    existing = clips.find_clip_folder(clips.get_clips_root(), line)
+    if existing:
+        return jsonify({"queued": False, "already_saved": True, "line_ids": [line.id], "folder": existing}), 200
+
+    wait_seconds = clips.seconds_until_clip_ready(line)
+    _queue_clip_save(line, wait_seconds)
+    return jsonify({"queued": True, "line_ids": [line.id], "wait_seconds": wait_seconds}), 200
 
 
 @app.route("/texthooker/audio/<token>", methods=["GET"])
@@ -1188,9 +1310,9 @@ def translate_line():
       400:
         description: Invalid request or AI not configured
     """
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     event_id = data.get("id")
-    text = data.get("text", "").strip()
+    text = str(data.get("text") or "").strip()
     if event_id is None:
         return jsonify({"error": "Missing id"}), 400
 
@@ -1212,15 +1334,7 @@ def translate_line():
         """)
 
     if not get_config().ai.is_configured():
-        return jsonify(
-            {
-                "error": (
-                    'AI translation is not set up yet. Configure it in the "AI / Translation" '
-                    "tab of Config, then try again."
-                ),
-                "href": AI_TRANSLATION_SETUP_DOCS_URL,
-            }
-        ), 400
+        return jsonify(ai_setup_required(automatic=data.get("automatic") is True)), 400
     line = get_event_line_by_id(event_id)
     if line is None:
         return jsonify({"error": "Invalid id"}), 400
@@ -1232,6 +1346,8 @@ def translate_line():
         get_current_game(),
         custom_prompt=prompt,
     )
+    if not translation or translation.startswith("Processing failed:"):
+        return jsonify({"error": ai_error_message(translation), "code": "ai_request_failed"}), 502
     line.set_TL(translation)
     return jsonify({"TL": translation}), 200
 
@@ -1265,23 +1381,17 @@ def translate_multiple():
       500:
         description: Translation failed
     """
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     event_ids = data.get("ids", [])
     if not event_ids:
         return jsonify({"error": "Missing ids"}), 400
 
     if not get_config().ai.is_configured():
-        return jsonify(
-            {
-                "error": (
-                    'AI translation is not set up yet. Configure it in the "AI / Translation" '
-                    "tab of Config, then try again."
-                ),
-                "href": AI_TRANSLATION_SETUP_DOCS_URL,
-            }
-        ), 400
+        return jsonify(ai_setup_required(automatic=data.get("automatic") is True)), 400
 
     lines = [line for event_id in event_ids if (line := get_event_line_by_id(event_id)) is not None]
+    if not lines:
+        return jsonify({"error": "No matching lines found"}), 400
 
     text = "\n".join(line.text for line in lines)
 
@@ -1309,7 +1419,42 @@ def translate_multiple():
         custom_prompt=translate_multiple_lines_prompt,
     )
 
+    if not translation or translation.startswith("Processing failed:"):
+        return jsonify({"error": ai_error_message(translation), "code": "ai_request_failed"}), 502
     return translation, 200
+
+
+@app.route("/ai/open-settings", methods=["POST"])
+def open_ai_setup():
+    opened = open_ai_settings()
+    return jsonify({"settings_opened": opened, "href": AI_TRANSLATION_SETUP_DOCS_URL}), 200
+
+
+@app.route("/analyze-line", methods=["POST"])
+def analyze_line():
+    data = request.get_json(silent=True) or {}
+    event_id = data.get("id")
+    mode = data.get("mode", "sentence")
+    question = data.get("question", "")
+    if event_id is None or not isinstance(mode, str) or mode not in {*STUDY_TASKS, "custom"}:
+        return jsonify({"error": "Choose a sentence and a valid analysis mode."}), 400
+    if not isinstance(question, str) or len(question) > 4000 or (mode == "custom" and not question.strip()):
+        return jsonify({"error": "Enter a question of 1–4000 characters."}), 400
+    if not get_config().ai.is_configured():
+        return jsonify(ai_setup_required(automatic=data.get("automatic") is True)), 400
+    line = get_event_line_by_id(event_id)
+    if line is None:
+        return jsonify({"error": "Invalid id"}), 400
+    text = data.get("text") or line.text
+    if not isinstance(text, str) or not text.strip():
+        return jsonify({"error": "No sentence available to explain."}), 400
+    try:
+        result = get_sentence_analysis(get_all_lines(), text, line, get_current_game(), mode=mode, question=question)
+        if not result:
+            raise ValueError("Empty AI response")
+        return jsonify({"analysis": result, "mode": mode}), 200
+    except Exception as exc:
+        return jsonify({"error": ai_error_message(exc), "code": "ai_request_failed"}), 502
 
 
 @app.route("/get_status", methods=["GET"])
@@ -1378,6 +1523,16 @@ def linux_set_target_process():
     except Exception as e:
         logger.error(f"Failed to set linux_target_process: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/linux/set_scene_target_process", methods=["POST"])
+def linux_set_scene_target_process():
+    """Hold the active scene's game-exe basename as the pause target, without saving it."""
+    from GameSentenceMiner.util.platform.base_window_monitor import set_scene_linux_target
+
+    data = request.get_json(silent=True) or {}
+    basename = set_scene_linux_target(str(data.get("target") or ""))
+    return jsonify({"success": True, "scene_target_process": basename}), 200
 
 
 @app.template_filter("datetimeformat")
@@ -1508,7 +1663,12 @@ def get_event_line_by_id(event_id: str):
         return line
 
     event = event_manager.get(event_id)
-    return event.line if event else None
+    if event:
+        return event.line
+    # A saved line outlives the session's text log.
+    from GameSentenceMiner.util import clips
+
+    return clips.find_saved_line(event_id)
 
 
 def are_lines_selected():
@@ -1656,6 +1816,22 @@ def _start_legacy_moved_page_server():
     logger.info(f"Legacy moved-page server active on {host}:{legacy_port} (current texthooker port: {current_port}).")
 
 
+def _open_texthooker_on_startup():
+    # A browser launched by an elevated process can inherit its admin context.
+    # Keep the saved preference so it applies again on a normal GSM launch.
+    if get_config().general.open_multimine_on_startup:
+        if is_windows_admin():
+            logger.info(
+                "Automatic Text Feed opening is disabled because GSM is running as administrator. "
+                "Start GSM without administrator privileges to enable automatic opening, "
+                f"or open http://localhost:{_get_single_port()} in your browser."
+            )
+        else:
+            # Browser launch can block. Keep the HTTP server free to serve the
+            # first request, including the standalone gateway's event loop.
+            submit_background_work(open_texthooker)
+
+
 def start_web_server(debug=False):
     logger.debug("Starting web server...")
     start_default_websocket_server()
@@ -1664,30 +1840,35 @@ def start_web_server(debug=False):
     log.setLevel(logging.ERROR)  # Set to ERROR to suppress most logs
     _start_legacy_moved_page_server()
 
-    # Open the default browser
-    if get_config().general.open_multimine_on_startup:
-        open_texthooker()
-
     # FOR TEXTHOOKER DEVELOPMENT, UNCOMMENT THE FOLLOWING LINE WITH Flask-CORS INSTALLED:
     # from flask_cors import CORS
     # CORS(app, resources={r"/*": {"origins": "http://localhost:5174"}})
     host = get_config().advanced.localhost_bind_address
     single_port = _get_single_port()
     if _is_single_port_experiment_enabled():
-        if _try_start_single_port_gateway(host, single_port):
+        if _try_start_single_port_gateway(host, single_port, on_ready=_open_texthooker_on_startup):
             return
         logger.warning("Single-port gateway unavailable; continuing with default waitress mode.")
 
-    _run_waitress_server(host, single_port)
+    _run_waitress_server(host, single_port, on_ready=_open_texthooker_on_startup)
 
 
 def stop_web_server(timeout: float = 5.0) -> None:
-    """Close managed HTTP listeners and cancel the gateway adapter."""
+    """Close HTTP listeners and finish gateway cleanup before its loop stops."""
     global _single_port_gateway_future
     gateway_future = _single_port_gateway_future
-    _single_port_gateway_future = None
-    if gateway_future is not None and not gateway_future.done():
-        gateway_future.cancel()
+    request_stop = _single_port_gateway_stop
+    try:
+        if request_stop is not None:
+            request_stop()
+        if gateway_future is not None:
+            # Cancelling a run_coroutine_threadsafe Future marks it done before
+            # its coroutine's finally block runs, so signal shutdown and join it.
+            gateway_future.result(timeout=timeout)
+    except Exception as error:  # noqa: BLE001 - still close the independent HTTP listeners
+        logger.warning(f"Failed to finish single-port gateway shutdown: {error}")
+    if gateway_future is not None and gateway_future.done():
+        _single_port_gateway_future = None
 
     notice_server = _legacy_notice_server
     if notice_server is not None:

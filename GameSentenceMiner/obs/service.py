@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import os
 import socket
 import threading
 import time
@@ -13,12 +14,15 @@ from obsws_python.util import to_snake_case
 
 from GameSentenceMiner.util.config.configuration import (
     get_config,
-    get_master_config,
     gsm_state,
     gsm_status,
     is_windows,
     logger,
-    save_full_config,
+)
+from GameSentenceMiner.util.media_paths import (
+    get_writable_media_directory,
+    same_directory,
+    set_gsm_recording_directory,
 )
 from GameSentenceMiner.util.concurrency.work_pool import submit_background_work
 from GameSentenceMiner.util.concurrency.scheduler import (
@@ -56,6 +60,7 @@ OBS_RETRYABLE_ERROR_SUBSTRINGS = (
     "websocket",
 )
 OBS_SERVICE_REFRESH_COOLDOWN_SECONDS = 2.0
+REPLAY_BUFFER_WINDOW_INACTIVITY_SECONDS = 300.0
 _obs_service_refresh_lock = threading.Lock()
 _last_obs_service_refresh_attempt = 0.0
 
@@ -240,6 +245,7 @@ class OBSConnectionPool:
 class OBSState:
     current_scene: str = ""
     scene_items_by_scene: Dict[str, List[dict]] = field(default_factory=dict)
+    scene_items_checked_at: Dict[str, float] = field(default_factory=dict)
     input_active_by_name: Dict[str, bool] = field(default_factory=dict)
     input_show_by_name: Dict[str, bool] = field(default_factory=dict)
     input_settings_by_name: Dict[str, dict] = field(default_factory=dict)
@@ -252,6 +258,7 @@ class OBSState:
     # True = capture producing output, False = capture empty, None = undetermined.
     source_output_active: Optional[bool] = None
     source_output_checked_at: float = 0.0
+    source_output_scene: str = ""
     # Timestamp output first became (and has stayed) empty; None once it has output
     # again. Lets consumers require a sustained no-output streak, not a single probe.
     source_output_empty_since: Optional[float] = None
@@ -310,6 +317,7 @@ class OBSService:
         self._event_callbacks: Dict[str, Callable] = {}
         self._handler_accepts_event_name: Dict[Callable, bool] = {}
         self._scene_observed_handlers: List[Callable[[str], None]] = []
+        self._recording_directory_handlers: list[Callable[[str], None]] = []
 
         # Replay buffer management
         self._replay_buffer_action_pending: Optional[bool] = None
@@ -320,6 +328,9 @@ class OBSService:
         self._replay_buffer_action_grace_seconds = 8.0
         self._source_no_output_timestamp: Optional[float] = None
         self._no_output_shutdown_seconds = 300
+        self._window_inactive_since: Optional[float] = None
+        self._window_inactivity_stopped_replay = False
+        self._last_window_activity: Optional[str] = None
         self._initial_replay_check_done = False
         self._auto_start_paused_by_external_replay_stop = False
         self._connection_grace_deadline = 0.0
@@ -473,12 +484,26 @@ class OBSService:
             except Exception as e:
                 logger.debug(f"Scene observed handler failed for '{scene_name}': {e}")
 
+    def on_recording_directory_changed(self, handler: Callable[[str], None]):
+        if handler not in self._recording_directory_handlers:
+            self._recording_directory_handlers.append(handler)
+
+    def _notify_recording_directory_changed(self, directory: str):
+        for handler in list(self._recording_directory_handlers):
+            try:
+                handler(directory)
+            except Exception:
+                logger.exception(f"Could not update GSM's recording file watcher to {directory!r}")
+
     # -- state init ----------------------------------------------------------
 
     def _initialize_state(self):
         try:
 
             def _init(client):
+                if self.check_output:
+                    _sync_obs_recording_directory(client, service=self)
+
                 response = client.get_current_program_scene()
                 scene_name = response.scene_name if response else ""
                 with self._state_lock:
@@ -556,6 +581,11 @@ class OBSService:
         scene_name = getattr(data, "scene_name", None)
         if not scene_name:
             return
+        with self._state_lock:
+            if scene_name == self.state.current_scene:
+                self.state.source_output_active = None
+                self.state.source_output_checked_at = 0
+                self.state.source_output_empty_since = None
         try:
             self._refresh_scene_items(scene_name)
             self._enforce_helper_scene_items_disabled(scene_name)
@@ -735,6 +765,7 @@ class OBSService:
         scene_items = response.scene_items if response else []
         with self._state_lock:
             self.state.scene_items_by_scene[scene_name] = scene_items
+            self.state.scene_items_checked_at[scene_name] = time.time()
             if scene_name == self.state.current_scene:
                 self.state.current_source_name = self._pick_source_name(scene_items)
 
@@ -871,6 +902,9 @@ class OBSService:
     def _is_output_active_from_screenshot(self) -> Optional[bool]:
         from GameSentenceMiner.obs.actions import get_screenshot_PIL
 
+        with self._state_lock:
+            probe_scene = self.state.current_scene
+
         # force_obs=True: this probe decides whether to stop the replay buffer, which
         # records OBS's composited output.  We must sample that same output, not a
         # direct Windows Graphics Capture of the game window — WGC bypasses OBS and can
@@ -879,17 +913,124 @@ class OBSService:
         img = get_screenshot_PIL(compression=50, img_format="jpg", width=8, height=8, force_obs=True)
         result = None if not img else not is_image_empty(img)
         with self._state_lock:
+            if self.state.current_scene != probe_scene:
+                return None
             now = time.time()
+            if self.state.source_output_scene != probe_scene or now - self.state.source_output_checked_at > 30:
+                self.state.source_output_empty_since = None
+            self.state.source_output_scene = probe_scene
             self.state.source_output_active = result
             self.state.source_output_checked_at = now
-            if result is True:
-                # Has output: streak broken.
+            if result is not False:
+                # Visible or unknown output breaks a confirmed-empty streak.
                 self.state.source_output_empty_since = None
             elif result is False and self.state.source_output_empty_since is None:
-                # First confirmed-empty probe; start the streak. None (undetermined)
-                # leaves the streak untouched so transient probe failures don't reset it.
+                # Only continuous confirmed-empty probes establish inactivity.
                 self.state.source_output_empty_since = now
         return result
+
+    def _get_window_activity(self, current_scene: str) -> Optional[str]:
+        """Return the tracked game's window state when it belongs to this OBS scene."""
+        if not is_windows() or not current_scene:
+            return None
+
+        from GameSentenceMiner.util.platform.window_state_monitor import get_window_state_monitor
+
+        monitor = get_window_state_monitor()
+        if not monitor or getattr(monitor, "last_target_scene_name", None) != current_scene:
+            return None
+        if not getattr(monitor, "ever_had_target_hwnd", False):
+            return None
+
+        state = getattr(monitor, "last_state", None)
+        if state in {"active", "background", "obscured"} and getattr(monitor, "target_hwnd", None):
+            return state
+        if state == "minimized" and (
+            getattr(monitor, "target_hwnd", None) or getattr(monitor, "last_known_target_hwnd", None)
+        ):
+            return state
+        return None
+
+    def _manage_replay_buffer(self, source_active: Optional[bool], now: float, current_scene: str) -> None:
+        if _is_obs_recording_disabled() or not get_config().obs.automatically_manage_replay_buffer:
+            self._window_inactive_since = None
+            self._window_inactivity_stopped_replay = False
+            self._last_window_activity = None
+            return
+
+        from GameSentenceMiner.obs.actions import start_replay_buffer, stop_replay_buffer
+
+        window_activity = self._get_window_activity(current_scene)
+        previous_window_activity = self._last_window_activity
+        self._last_window_activity = window_activity
+
+        if window_activity in {"background", "obscured", "minimized"}:
+            if self._window_inactive_since is None:
+                self._window_inactive_since = time.monotonic()
+            if time.monotonic() - self._window_inactive_since >= REPLAY_BUFFER_WINDOW_INACTIVITY_SECONDS:
+                if self._get_replay_buffer_active():
+                    logger.info("Game window inactive for five minutes; stopping OBS replay buffer.")
+                    stop_replay_buffer()
+                    if self._get_replay_buffer_active() is False:
+                        self._window_inactivity_stopped_replay = True
+                return
+        else:
+            self._window_inactive_since = None
+            if window_activity is None:
+                self._window_inactivity_stopped_replay = False
+
+        if window_activity == "active" and self._window_inactivity_stopped_replay:
+            if self._get_replay_buffer_active() is True:
+                self._window_inactivity_stopped_replay = False
+            elif self._can_auto_start_replay_buffer():
+                # OBS may need another frame to satisfy the output probe. A buffer
+                # stopped by this rule should resume as soon as the game has focus.
+                start_replay_buffer()
+                if self._get_replay_buffer_active() is True:
+                    self._window_inactivity_stopped_replay = False
+                    self._source_no_output_timestamp = None
+            return
+
+        # Use the same game detection as overlay/hook automation. A captured live
+        # window is enough to start buffering, including during a black loading
+        # screen or between the periodic OBS output probes.
+        if source_active is not True:
+            from GameSentenceMiner.obs.active_game import get_active_game_snapshot
+            from GameSentenceMiner.util.platform.window_state_monitor import get_window_state_monitor
+
+            snapshot = get_active_game_snapshot(get_window_state_monitor())
+            if snapshot["sceneName"] == current_scene and snapshot["active"] is True:
+                source_active = True
+
+        # If game detection is still inconclusive, a focus change can confirm OBS
+        # output without waiting for the next scheduled screenshot probe.
+        if window_activity == "active" and previous_window_activity != "active" and source_active is None:
+            try:
+                source_active = self._is_output_active_from_screenshot()
+            except Exception:
+                source_active = None
+
+        if source_active is None:
+            return
+
+        replay_buffer_active = self._get_replay_buffer_active()
+        if replay_buffer_active is False and not self._initial_replay_check_done:
+            self._initial_replay_check_done = True
+            if not source_active:
+                return
+
+        if source_active:
+            self._source_no_output_timestamp = None
+            if replay_buffer_active is not True and self._can_auto_start_replay_buffer():
+                start_replay_buffer()
+            return
+
+        if replay_buffer_active:
+            if self._source_no_output_timestamp is None:
+                self._source_no_output_timestamp = now
+            elif now - self._source_no_output_timestamp >= self._no_output_shutdown_seconds:
+                stop_replay_buffer()
+                self._source_no_output_timestamp = None
 
     # -- fit-to-screen -------------------------------------------------------
 
@@ -928,40 +1069,8 @@ class OBSService:
         except Exception:
             pass
 
-        if not self.check_output:
-            return
-
-        if source_active is None:
-            return
-
-        if _is_obs_recording_disabled():
-            return
-
-        replay_buffer_active = self._get_replay_buffer_active()
-
-        if replay_buffer_active is False and not self._initial_replay_check_done:
-            self._initial_replay_check_done = True
-            if not source_active:
-                return
-
-        if not get_config().obs.automatically_manage_replay_buffer:
-            return
-
-        from GameSentenceMiner.obs.actions import start_replay_buffer, stop_replay_buffer
-
-        now = time.time()
-        if source_active:
-            self._source_no_output_timestamp = None
-            if replay_buffer_active is not True and self._can_auto_start_replay_buffer():
-                start_replay_buffer()
-            return
-
-        if replay_buffer_active:
-            if self._source_no_output_timestamp is None:
-                self._source_no_output_timestamp = now
-            elif now - self._source_no_output_timestamp >= self._no_output_shutdown_seconds:
-                stop_replay_buffer()
-                self._source_no_output_timestamp = None
+        if self.check_output:
+            self._manage_replay_buffer(source_active, time.time(), current_scene)
 
     # -- tick scheduling -----------------------------------------------------
 
@@ -1090,34 +1199,7 @@ class OBSService:
         if not self.check_output or not resolved.manage_replay_buffer:
             return
         self._tick_last_run_by_operation["manage_replay_buffer"] = now
-
-        if source_active is None or _is_obs_recording_disabled():
-            return
-
-        replay_buffer_active = self._get_replay_buffer_active()
-
-        if replay_buffer_active is False and not self._initial_replay_check_done:
-            self._initial_replay_check_done = True
-            if not source_active:
-                return
-
-        if not get_config().obs.automatically_manage_replay_buffer:
-            return
-
-        from GameSentenceMiner.obs.actions import start_replay_buffer, stop_replay_buffer
-
-        if source_active:
-            self._source_no_output_timestamp = None
-            if replay_buffer_active is not True and self._can_auto_start_replay_buffer():
-                start_replay_buffer()
-            return
-
-        if replay_buffer_active:
-            if self._source_no_output_timestamp is None:
-                self._source_no_output_timestamp = now
-            elif now - self._source_no_output_timestamp >= self._no_output_shutdown_seconds:
-                stop_replay_buffer()
-                self._source_no_output_timestamp = None
+        self._manage_replay_buffer(source_active, now, current_scene)
 
     def _mark_tick_operation(self, operation_name: str, now: float):
         self._tick_last_run_by_operation[operation_name] = now
@@ -1223,6 +1305,7 @@ class OBSConnectionManager(threading.Thread):
         super().__init__(name="gsm-obs-actor", daemon=False)
         self.running = True
         self._stop_event = threading.Event()
+        self._wake_event = threading.Event()
         self.check_connection_interval = 5.0
         self.recovery_cooldown_seconds = 2.0
         self.check_output = check_output
@@ -1230,6 +1313,10 @@ class OBSConnectionManager(threading.Thread):
         self.last_errors = []
         self._check_lock = threading.Lock()
         self.last_tick_time = 0
+
+    def request_tick(self) -> None:
+        """Wake the OBS loop after game detection or a tracked window-state change."""
+        self._wake_event.set()
 
     def _recover_obs_connection(self) -> bool:
         import GameSentenceMiner.obs as _obs_pkg
@@ -1299,7 +1386,7 @@ class OBSConnectionManager(threading.Thread):
         import GameSentenceMiner.obs as _obs_pkg
 
         disconnect_sleep_manager = SleepManager(initial_delay=2.0, name="OBS_Disconnect")
-        if self._stop_event.wait(5):
+        if self._stop_event.is_set():
             return
 
         # Initial periodic work
@@ -1312,7 +1399,9 @@ class OBSConnectionManager(threading.Thread):
         while self.running:
             if not gsm_status.obs_connected:
                 delay = disconnect_sleep_manager.current_delay
-                if self._stop_event.wait(delay):
+                woke_for_window = self._wake_event.wait(delay)
+                self._wake_event.clear()
+                if self._stop_event.is_set():
                     break
                 disconnect_sleep_manager.current_delay = min(
                     delay * disconnect_sleep_manager.backoff_factor,
@@ -1320,7 +1409,9 @@ class OBSConnectionManager(threading.Thread):
                 )
             else:
                 disconnect_sleep_manager.reset()
-                if self._stop_event.wait(self.check_connection_interval):
+                woke_for_window = self._wake_event.wait(self.check_connection_interval)
+                self._wake_event.clear()
+                if self._stop_event.is_set():
                     break
 
             if not self._check_obs_connection():
@@ -1330,7 +1421,8 @@ class OBSConnectionManager(threading.Thread):
             with self._check_lock:
                 if _obs_pkg.obs_service:
                     try:
-                        _obs_pkg.obs_service.tick()
+                        options = OBSTickOptions(manage_replay_buffer=True) if woke_for_window else None
+                        _obs_pkg.obs_service.tick(options)
                     except Exception as e:
                         logger.debug(f"Tick failed: {e}")
 
@@ -1347,6 +1439,7 @@ class OBSConnectionManager(threading.Thread):
     def stop(self):
         self.running = False
         self._stop_event.set()
+        self._wake_event.set()
 
 
 # ---------------------------------------------------------------------------
@@ -1384,10 +1477,6 @@ async def connect_to_obs(
                 gsm_status.obs_connected = True
                 logger.success("Connected to OBS WebSocket.")
 
-                if start_manager and not _obs_pkg.obs_connection_manager:
-                    _obs_pkg.obs_connection_manager = OBSConnectionManager(check_output=check_output)
-                    _obs_pkg.obs_connection_manager.start()
-
                 try:
                     from GameSentenceMiner.obs.actions import update_current_game
 
@@ -1401,6 +1490,11 @@ async def connect_to_obs(
                     apply_obs_performance_settings()
                 except Exception:
                     pass
+
+                # Configure outputs before the manager's immediate replay check.
+                if start_manager and not _obs_pkg.obs_connection_manager:
+                    _obs_pkg.obs_connection_manager = OBSConnectionManager(check_output=check_output)
+                    _obs_pkg.obs_connection_manager.start()
 
                 if get_config().features.generate_longplay and check_output and not _is_obs_recording_disabled():
                     try:
@@ -1456,10 +1550,6 @@ def connect_to_obs_sync(
                 gsm_status.obs_connected = True
                 logger.success("Connected to OBS WebSocket.")
 
-                if start_manager and not _obs_pkg.obs_connection_manager:
-                    _obs_pkg.obs_connection_manager = OBSConnectionManager(check_output=check_output)
-                    _obs_pkg.obs_connection_manager.start()
-
                 try:
                     from GameSentenceMiner.obs.actions import update_current_game
 
@@ -1473,6 +1563,11 @@ def connect_to_obs_sync(
                     apply_obs_performance_settings()
                 except Exception:
                     pass
+
+                # Configure outputs before the manager's immediate replay check.
+                if start_manager and not _obs_pkg.obs_connection_manager:
+                    _obs_pkg.obs_connection_manager = OBSConnectionManager(check_output=check_output)
+                    _obs_pkg.obs_connection_manager.start()
 
                 if get_config().features.generate_longplay and check_output and not _is_obs_recording_disabled():
                     try:
@@ -1526,24 +1621,75 @@ async def wait_for_obs_connected():
     return False
 
 
-async def check_obs_folder_is_correct():
-    if await wait_for_obs_connected():
+def _restart_replay_buffer_for_directory(client, service):
+    try:
+        replay_active = bool(client.get_replay_buffer_status().output_active)
+    except obs.error.OBSSDKRequestError as error:
+        if error.code == 500:  # OutputDisabled: no replay buffer needs restarting.
+            return
+        raise
+    if not replay_active:
+        return
+
+    # OBS stores the new path in its profile, but a running replay output keeps
+    # the old directory until restarted. Do not stop an active recording.
+    if service:
+        service.mark_replay_buffer_action(False)
+    client.stop_replay_buffer()
+    deadline = time.monotonic() + 3.0
+    while client.get_replay_buffer_status().output_active:
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Replay buffer did not stop; restart OBS to use the backup folder")
+        time.sleep(0.05)
+    if service:
+        service.mark_replay_buffer_action(True)
+    client.start_replay_buffer()
+    if service:
+        with service._state_lock:
+            service.state.replay_buffer_active = True
+        service._auto_start_paused_by_external_replay_stop = False
+    gsm_state.replay_buffer_stopped_timestamp = None
+
+
+def _sync_obs_recording_directory(client, service=None):
+    response = client.get_record_directory()
+    if response is None:
+        raise RuntimeError("OBS did not return its recording folder")
+    obs_directory = response.record_directory
+    directory = get_writable_media_directory(obs_directory, "recordings")
+    using_fallback = not same_directory(obs_directory, directory)
+    if using_fallback:
+        # OBS's API saves both Simple and Advanced recording paths. Forward
+        # slashes also keep Windows usernames safe from INI escape decoding.
+        obs_safe_directory = directory.replace("\\", "/") if os.name == "nt" else directory
         try:
-            from GameSentenceMiner.obs.actions import get_record_directory
+            client.set_record_directory(obs_safe_directory)
+            response = client.get_record_directory()
+            if response is None or not same_directory(response.record_directory, directory):
+                raise RuntimeError("OBS did not accept the backup recording folder")
+        except Exception as error:
+            raise RuntimeError(
+                f"Could not switch OBS from {obs_directory!r} to {directory!r}: {error}. "
+                "Stop recording and select the backup folder in OBS Settings > Output."
+            ) from error
+    previous_directory = get_config().paths.folder_to_watch
+    set_gsm_recording_directory(directory)
+    if service and not same_directory(previous_directory, directory):
+        service._notify_recording_directory_changed(directory)
+    if using_fallback:
+        _restart_replay_buffer_for_directory(client, service)
+        logger.warning(f"OBS recording folder was unavailable; switched OBS and GSM to {directory!r}")
 
-            obs_record_directory = get_record_directory()
-            if obs_record_directory and os.path.normpath(obs_record_directory) != os.path.normpath(
-                get_config().paths.folder_to_watch
-            ):
-                logger.info("OBS Path wrong, Setting OBS Recording folder in GSM Config...")
-                get_config().paths.folder_to_watch = os.path.normpath(obs_record_directory)
-                get_master_config().sync_shared_fields()
-                save_full_config(get_master_config())
-            else:
-                logger.debug("OBS Recording path looks correct")
-        except Exception as e:
-            logger.error(f"Error checking OBS folder: {e}")
+    return True
 
 
-# Needed by check_obs_folder_is_correct
-import os  # noqa: E402
+async def check_obs_folder_is_correct():
+    import GameSentenceMiner.obs as _obs_pkg
+
+    if await wait_for_obs_connected():
+        return _call_with_obs_client(
+            lambda client: _sync_obs_recording_directory(client, service=_obs_pkg.obs_service),
+            default=False,
+            error_msg="Error checking OBS recording folder",
+        )
+    return False

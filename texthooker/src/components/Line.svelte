@@ -1,5 +1,15 @@
 <script lang="ts">
-	import { mdiClockOutline, mdiHistory, mdiMenu, mdiPlay, mdiStop, mdiTrophy } from '@mdi/js';
+	import {
+		mdiClockOutline,
+		mdiContentSave,
+		mdiContentSaveCheck,
+		mdiCreationOutline,
+		mdiHistory,
+		mdiMenu,
+		mdiPlay,
+		mdiStop,
+		mdiTrophy,
+	} from '@mdi/js';
 	import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
 	import { fly } from 'svelte/transition';
 	import {
@@ -19,6 +29,7 @@
 		showScreenshotButton$,
 		showAudioButton$,
 		showTrimVideoButton$,
+		showSaveClipButton$,
 		showTranslateButton$,
 		settingsOpen$,
 	} from '../stores/stores';
@@ -32,7 +43,8 @@
 		updateScroll,
 	} from '../util';
 	import Icon from './Icon.svelte';
-	import { getGSMEndpoint } from '../gsm';
+	import AIHelp from './AIHelp.svelte';
+	import { formatMegabytes, getGSMEndpoint } from '../gsm';
 
 	export let line: LineItem;
 	export let index: number;
@@ -41,6 +53,9 @@
 	export let audioLineId = '';
 	export let audioIsPlaying = false;
 	export let audioPendingLineId = '';
+	export let isSavingClip = false;
+	export let isClipSaved = false;
+	export let clipSizeBytes: number | undefined = undefined;
 
 	export function deselect() {
 		isSelected = false;
@@ -56,27 +71,41 @@
 		edit: LineItemEditEvent;
 		audioToggle: { lineId: string; text: string };
 		videoTrim: { lineId: string; text: string };
+		saveClip: { lineId: string };
+		deleteClip: { lineId: string };
+		openClipFolder: { lineId: string };
 	}>();
 
 	let paragraph: HTMLElement;
 	let originalText = '';
+	let previousLineText = line.text;
 	let componentMounted = false;
 	let lineTextMounted = false;
 	let autoTranslationRevision = -1;
 	let isSelected = false;
 	let isEditable = false;
-	let actionsMenuOpen = false;
-	let actionsMenuElement: HTMLElement;
+	// One popover for the line's menus: the ☰ actions, or the saved clip's own menu.
+	let openMenu: 'actions' | 'clip' | null = null;
+	let menuAnchor: HTMLElement | undefined;
+	let aiHelpOpen = false;
 	let actionsMenuButton: HTMLButtonElement;
 	let actionsMenuPopover: HTMLElement;
 	let actionsMenuStyle = 'visibility: hidden;';
+	let aiError = '';
+	$: actionsMenuOpen = openMenu === 'actions';
 	$: isAudioLine = audioLineId === line.id;
 	$: isAudioPending = audioPendingLineId === line.id;
 	$: audioButtonTitle = isAudioPending ? 'Preparing audio...' : isAudioLine && audioIsPlaying ? 'Stop audio' : 'Play audio';
 	$: isActiveGSMLine = line.gsmStatus === 'active' || (!line.gsmStatus && $lineIDs$?.includes(line.id));
 	$: isTimedOutGSMLine = line.gsmStatus === 'timed_out' || (!line.gsmStatus && $timedOutIDs$.includes(line.id));
+	$: clipSizeLabel = clipSizeBytes ? formatMegabytes(clipSizeBytes) : '';
+	$: canAskAI = !!line.id && (isActiveGSMLine || isTimedOutGSMLine || isClipSaved || line.gsmStatus === 'external');
 
 	$: isVerticalDisplay = !pipWindow && $displayVertical$;
+	$: if (line.text !== previousLineText) {
+		previousLineText = line.text;
+		void followUpdatedLineText();
+	}
 	$: if (
 		componentMounted &&
 		line.recordState === 'frozen' &&
@@ -85,7 +114,7 @@
 		Number(line.revision ?? 0) > autoTranslationRevision
 	) {
 		autoTranslationRevision = Number(line.revision ?? 0);
-		handleAction(line.id, 'TL', $blurAutoTranslatedLines$);
+		handleAction(line.id, 'TL', $blurAutoTranslatedLines$, true);
 	}
 
 	onMount(() => {
@@ -129,6 +158,29 @@
 		}
 	}
 
+	async function followUpdatedLineText() {
+		if (!lineTextMounted || !isLast || !paragraph) {
+			return;
+		}
+		// Revisions reuse this component, so onMount cannot follow growing speech
+		// transcripts. Capture the reader's position before the keyed text rerenders.
+		const view = pipWindow || window;
+		const container = paragraph.parentElement?.parentElement ?? null;
+		if (
+			!shouldAutoScroll(
+				$alwaysScrollToNewest$,
+				isScrolledToEnd(view, container, $reverseLineOrder$, isVerticalDisplay),
+			)
+		) {
+			return;
+		}
+		await tick();
+		if (!componentMounted || !isLast) {
+			return;
+		}
+		updateScroll(view, container, $reverseLineOrder$, isVerticalDisplay, $enableLineAnimation$ ? 'smooth' : 'auto');
+	}
+
 	function getActionsWindow() {
 		return pipWindow || window;
 	}
@@ -145,18 +197,18 @@
 	}
 
 	function closeActionsMenu() {
-		actionsMenuOpen = false;
+		openMenu = null;
 		actionsMenuStyle = 'visibility: hidden;';
 		removeActionsMenuListeners();
 	}
 
 	function positionActionsMenu() {
-		if (!actionsMenuButton || !actionsMenuPopover) {
+		if (!menuAnchor || !actionsMenuPopover) {
 			return;
 		}
 
 		const view = getActionsWindow();
-		const buttonRect = actionsMenuButton.getBoundingClientRect();
+		const buttonRect = menuAnchor.getBoundingClientRect();
 		const menuRect = actionsMenuPopover.getBoundingClientRect();
 		const viewportGap = 8;
 		const menuGap = 5;
@@ -170,14 +222,16 @@
 		actionsMenuStyle = `left: ${Math.round(left)}px; top: ${Math.round(top)}px; visibility: visible;`;
 	}
 
-	function toggleActionsMenu(event: MouseEvent) {
+	function toggleMenu(event: MouseEvent, menu: 'actions' | 'clip') {
 		event.stopPropagation();
-		if (actionsMenuOpen) {
-			closeActionsMenu();
+		const wasOpen = openMenu === menu;
+		closeActionsMenu();
+		if (wasOpen) {
 			return;
 		}
 
-		actionsMenuOpen = true;
+		openMenu = menu;
+		menuAnchor = event.currentTarget as HTMLElement;
 		tick().then(() => {
 			positionActionsMenu();
 			getActionsDocument().addEventListener('click', actionsMenuClickOutsideHandler, false);
@@ -188,7 +242,8 @@
 	}
 
 	function actionsMenuClickOutsideHandler(event: MouseEvent) {
-		if (!actionsMenuElement?.contains(event.target as Node)) {
+		const target = event.target as Node;
+		if (!actionsMenuPopover?.contains(target) && !menuAnchor?.contains(target)) {
 			closeActionsMenu();
 		}
 	}
@@ -267,6 +322,33 @@
 		dispatch('videoTrim', { lineId: line.id, text: line.text });
 	}
 
+	function handleSaveClip() {
+		closeActionsMenu();
+		dispatch('saveClip', { lineId: line.id });
+	}
+
+	function handleOpenClipFolder() {
+		closeActionsMenu();
+		dispatch('openClipFolder', { lineId: line.id });
+	}
+
+	function handleDeleteClip() {
+		closeActionsMenu();
+		if (getActionsWindow().confirm('Move this clip to the trash? You can restore it from there.')) {
+			dispatch('deleteClip', { lineId: line.id });
+		}
+	}
+
+	function openAIHelp() {
+		closeActionsMenu();
+		aiHelpOpen = true;
+	}
+
+	function closeAIHelp() {
+		aiHelpOpen = false;
+		tick().then(() => actionsMenuButton?.focus());
+	}
+
 	async function handleDeleteFromStats() {
 		if (!getActionsWindow().confirm('Delete this line from stats?')) {
 			return;
@@ -287,8 +369,9 @@
 		}
 	}
 
-	function handleAction(id: string, action: string, blurTranslate: boolean = false) {
+	function handleAction(id: string, action: string, blurTranslate: boolean = false, automatic: boolean = false) {
 		closeActionsMenu();
+		if (action === 'TL') aiError = '';
 		const endpoints: Record<string, string> = {
 			TL: '/translate-line',
 			Screenshot: '/get-screenshot',
@@ -300,11 +383,12 @@
 		fetch(getGSMEndpoint(endpoint), {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ id, text: line.text }),
+			body: JSON.stringify({ id, text: line.text, automatic }),
 		})
-			.then((response) => {
+			.then(async (response) => {
 				if (!response.ok) {
-					throw new Error(`HTTP error! Status: ${response.status}`);
+					const data = await response.json().catch(() => ({}));
+					throw new Error(data.error || `Request failed (HTTP ${response.status}).`);
 				}
 				return response.json();
 			})
@@ -356,6 +440,7 @@
 				}
 			})
 			.catch((error) => {
+				if (action === 'TL') aiError = error.message || 'Translation failed. Check that GSM is running and retry.';
 				console.error(`Error performing ${action} action for event ID: ${id}`, error);
 			});
 	}
@@ -426,7 +511,7 @@
 					Not in GSM stats
 				</div>
 			{/if}
-			{#if isActiveGSMLine}
+			{#if isActiveGSMLine || isClipSaved}
 				<div class="textline-buttons unselectable">
 					{#if $showScreenshotButton$}
 						<button
@@ -446,6 +531,31 @@
 							tabindex="-1"
 						>
 							🎬
+						</button>
+					{/if}
+					{#if isClipSaved}
+						<button
+							class="action-button clip-status"
+							class:menu-open={openMenu === 'clip'}
+							on:click={(event) => toggleMenu(event, 'clip')}
+							title="Clip saved for later"
+							aria-label="Clip saved for later"
+							aria-expanded={openMenu === 'clip'}
+							tabindex="-1"
+						>
+							<Icon path={mdiContentSaveCheck} width="16px" height="16px" />
+						</button>
+					{:else if $showSaveClipButton$}
+						<!-- Kept visible on small screens: saving from a phone or tablet is the main use. -->
+						<button
+							class="action-button"
+							on:click={handleSaveClip}
+							title={isSavingClip ? 'Saving…' : 'Save clip for later'}
+							aria-label="Save clip for later"
+							tabindex="-1"
+							disabled={isSavingClip}
+						>
+							<Icon path={mdiContentSave} width="16px" height="16px" />
 						</button>
 					{/if}
 					{#if $showAudioButton$}
@@ -470,52 +580,6 @@
 							🌐
 						</button>
 					{/if}
-					<div class="actions-menu" bind:this={actionsMenuElement}>
-						<button
-							class="action-button menu-toggle"
-							class:menu-open={actionsMenuOpen}
-							on:click={toggleActionsMenu}
-							title="More line actions"
-							aria-label="More line actions"
-							aria-expanded={actionsMenuOpen}
-							tabindex="-1"
-							bind:this={actionsMenuButton}
-						>
-							<Icon path={mdiMenu} width="16px" height="16px" />
-						</button>
-						{#if actionsMenuOpen}
-							<div
-								class="actions-menu-popover"
-								style={actionsMenuStyle}
-								bind:this={actionsMenuPopover}
-							>
-								<button on:click={() => handleAction(line.id, 'Screenshot')}>
-									<span aria-hidden="true">📷</span>
-									<span>Screenshot</span>
-								</button>
-								<button on:click={handleVideoTrim}>
-									<span aria-hidden="true">🎬</span>
-									<span>Save cropped replay</span>
-								</button>
-								<button on:click={handleAudioToggle} disabled={isAudioPending}>
-									<Icon
-										path={isAudioLine && audioIsPlaying ? mdiStop : mdiPlay}
-										width="16px"
-										height="16px"
-									/>
-									<span>{audioButtonTitle}</span>
-								</button>
-								<button on:click={() => handleAction(line.id, 'TL')}>
-									<span aria-hidden="true">🌐</span>
-									<span>Translate</span>
-								</button>
-								<button on:click={handleDeleteFromStats}>
-									<span aria-hidden="true">🗑️</span>
-									<span>Delete from stats</span>
-								</button>
-							</div>
-						{/if}
-					</div>
 				</div>
 			{:else if isTimedOutGSMLine}
 				<div
@@ -559,9 +623,98 @@
 					<Icon path={mdiHistory} width="32px" height="32px" />
 				</div>
 			{/if}
+			{#if canAskAI}
+				<div class="actions-menu">
+					<button
+						class="action-button menu-toggle"
+						class:menu-open={actionsMenuOpen}
+						on:click={(event) => toggleMenu(event, 'actions')}
+						title="More line actions"
+						aria-label="More line actions"
+						aria-expanded={actionsMenuOpen}
+						bind:this={actionsMenuButton}
+					>
+						<Icon path={mdiMenu} width="16px" height="16px" />
+					</button>
+				</div>
+			{/if}
+			{#if openMenu}
+				<div
+					class="actions-menu-popover"
+					class:clip-menu={openMenu === 'clip'}
+					style={actionsMenuStyle}
+					bind:this={actionsMenuPopover}
+				>
+					{#if openMenu === 'clip'}
+						<div class="clip-menu-info" title="Disk space used by this clip">
+							<span aria-hidden="true">💾</span>
+							<span>Clip{clipSizeLabel ? ` · ${clipSizeLabel}` : ''}</span>
+						</div>
+						<button on:click={handleOpenClipFolder} title="Open clip folder">
+							<span aria-hidden="true">📂</span>
+							<span>Open clip folder</span>
+						</button>
+						<button on:click={handleDeleteClip} title="Delete clip">
+							<span aria-hidden="true">🗑️</span>
+							<span>Delete clip</span>
+						</button>
+					{:else}
+						<button on:click={openAIHelp}>
+							<Icon path={mdiCreationOutline} width="16px" height="16px" />
+							<span>Ask AI</span>
+						</button>
+						{#if isActiveGSMLine || isClipSaved}
+							<button on:click={() => handleAction(line.id, 'Screenshot')}>
+								<span aria-hidden="true">📷</span>
+								<span>Screenshot</span>
+							</button>
+							<button on:click={handleVideoTrim}>
+								<span aria-hidden="true">🎬</span>
+								<span>Save cropped replay</span>
+							</button>
+							{#if !isClipSaved}
+								<button
+									on:click={handleSaveClip}
+									disabled={isSavingClip}
+									title="Keep a replay clip of this line so a card can be made later"
+								>
+									<span aria-hidden="true">💾</span>
+									<span>{isSavingClip ? 'Saving…' : 'Save clip for later'}</span>
+								</button>
+							{/if}
+							<button on:click={handleAudioToggle} disabled={isAudioPending}>
+								<Icon
+									path={isAudioLine && audioIsPlaying ? mdiStop : mdiPlay}
+									width="16px"
+									height="16px"
+								/>
+								<span>{audioButtonTitle}</span>
+							</button>
+						{/if}
+						<button on:click={() => handleAction(line.id, 'TL')} title="Translate">
+							<span aria-hidden="true">🌐</span>
+							<span>Translate</span>
+						</button>
+						{#if isActiveGSMLine}
+							<button on:click={handleDeleteFromStats}>
+								<span aria-hidden="true">🗑️</span>
+								<span>Delete from stats</span>
+							</button>
+						{/if}
+					{/if}
+				</div>
+			{/if}
 		</div>
 	</div>
 {/key}
+{#if aiError}
+	<p role="alert" class="mx-4 text-sm">{aiError} <a class="underline" href="https://docs.gamesentenceminer.com/docs/features/ai-features" target="_blank" rel="noreferrer">AI setup guide</a></p>
+{/if}
+{#if canAskAI && aiHelpOpen && !$settingsOpen$}
+	{#key `${line.id}:${line.text.trim()}`}
+		<AIHelp id={line.id} text={line.text} on:close={closeAIHelp} />
+	{/key}
+{/if}
 {@html newLineCharacter}
 {#if $milestoneLines$.has(line.id)}
 	<div
@@ -729,6 +882,18 @@
 
 	.line-indicator:hover {
 		opacity: 1;
+	}
+
+	.clip-status {
+		color: var(--color-success);
+	}
+
+	.clip-menu-info {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		padding: 7px 10px;
+		opacity: 0.7;
 	}
 
 	.line-actions-container {

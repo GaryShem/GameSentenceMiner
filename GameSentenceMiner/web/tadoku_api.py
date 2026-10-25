@@ -9,9 +9,11 @@ from flask import current_app, jsonify, request
 
 from GameSentenceMiner.util.config.configuration import get_stats_config, save_stats_config
 from GameSentenceMiner.util.tadoku_sync import (
+    TADOKU_TITLE_SOURCES,
     TadokuClient,
     TadokuSyncError,
     build_tadoku_preview,
+    normalize_tadoku_log_descriptions,
     run_tadoku_sync,
 )
 
@@ -39,7 +41,13 @@ class TadokuSyncJobManager:
         self._jobs: dict[str, _TadokuJob] = {}
         self._lock = threading.Lock()
 
-    def start(self, *, deduplicate: bool, run_inline: bool = False) -> dict[str, Any]:
+    def start(
+        self,
+        *,
+        deduplicate: bool,
+        log_descriptions: dict[str, str] | None = None,
+        run_inline: bool = False,
+    ) -> dict[str, Any]:
         job = _TadokuJob(job_id=uuid.uuid4().hex)
         with self._lock:
             if any(candidate.status in {"queued", "running"} for candidate in self._jobs.values()):
@@ -47,11 +55,11 @@ class TadokuSyncJobManager:
             self._jobs[job.job_id] = job
 
         if run_inline:
-            self._run(job, deduplicate)
+            self._run(job, deduplicate, log_descriptions)
         else:
             thread = threading.Thread(
                 target=self._run,
-                args=(job, deduplicate),
+                args=(job, deduplicate, log_descriptions),
                 name="gsm-tadoku-sync",
                 daemon=True,
             )
@@ -64,11 +72,11 @@ class TadokuSyncJobManager:
         return job.payload() if job else None
 
     @staticmethod
-    def _run(job: _TadokuJob, deduplicate: bool) -> None:
+    def _run(job: _TadokuJob, deduplicate: bool, log_descriptions: dict[str, str] | None) -> None:
         with job._lock:
             job.status = "running"
         try:
-            result = run_tadoku_sync(deduplicate=deduplicate)
+            result = run_tadoku_sync(deduplicate=deduplicate, log_descriptions=log_descriptions)
         except Exception as exc:
             with job._lock:
                 job.status = "failed"
@@ -89,7 +97,7 @@ def register_tadoku_api_routes(app):
         username = str(getattr(config, "tadoku_username", "") or "").strip()
         password = str(getattr(config, "tadoku_password", "") or "")
         if not username or not password:
-            return jsonify({"error": "Save a Tadoku username and password first"}), 400
+            return jsonify({"error": "Save a Tadoku email and password first"}), 400
 
         try:
             client = TadokuClient(username, password)
@@ -104,17 +112,29 @@ def register_tadoku_api_routes(app):
     @app.route("/api/tadoku/preview", methods=["GET"])
     def api_tadoku_preview():
         deduplicate = request.args.get("deduplicate", "false").lower() in {"1", "true", "yes", "on"}
-        preview = build_tadoku_preview(deduplicate=deduplicate)
         config = get_stats_config()
+        title_source = request.args.get("title_source", getattr(config, "tadoku_title_source", "english"))
+        if title_source not in TADOKU_TITLE_SOURCES:
+            return jsonify({"error": "Tadoku title source must be english, original, or romaji"}), 400
+        preview = build_tadoku_preview(deduplicate=deduplicate, title_source=title_source)
         preview["configured"] = bool(getattr(config, "tadoku_username", "") and getattr(config, "tadoku_password", ""))
         return jsonify(preview), 200
 
     @app.route("/api/tadoku/sync", methods=["POST"])
     def api_tadoku_sync():
-        data = request.get_json(silent=True) or {}
+        data = request.get_json(silent=True)
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            return jsonify({"error": "Tadoku sync options must be an object"}), 400
+        try:
+            log_descriptions = normalize_tadoku_log_descriptions(data.get("log_descriptions"))
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
         try:
             payload = tadoku_sync_job_manager.start(
                 deduplicate=bool(data.get("deduplicate", False)),
+                log_descriptions=log_descriptions,
                 run_inline=bool(current_app.testing),
             )
         except TadokuSyncError as exc:

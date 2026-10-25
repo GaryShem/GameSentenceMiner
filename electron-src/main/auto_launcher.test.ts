@@ -14,6 +14,9 @@ const stopOCRMock = vi.fn();
 const getOverlayRuntimeStateMock = vi.fn();
 const runOverlayWithSourceMock = vi.fn();
 const stopOverlayMock = vi.fn();
+const adoptStartupOverlayForAutomationMock = vi.fn();
+const getActiveGameMock = vi.fn();
+const hasActiveGameSnapshotMock = vi.fn();
 const getProfileForMock = vi.fn();
 const getRuntimeStatusMock = vi.fn();
 const setTextHookUserStartListenerMock = vi.fn();
@@ -30,12 +33,15 @@ const getLunaTranslatorPathMock = vi.fn();
 const getObsOcrScenesMock = vi.fn();
 const getIgnoreActiveSceneForOcrMock = vi.fn();
 const getForceManualOcrAllProfilesMock = vi.fn();
+const getRunOverlayOnStartupMock = vi.fn();
+const getRunOverlayWithActiveGameMock = vi.fn();
 const getSceneLaunchProfileForSceneMock = vi.fn();
 const getSteamGamesMock = vi.fn();
 const getTextractorPath32Mock = vi.fn();
 const getTextractorPath64Mock = vi.fn();
 const getYuzuGamesConfigMock = vi.fn();
 const getGameExePathForSceneMock = vi.fn();
+const getWindowSceneSwitcherConfigMock = vi.fn();
 const upsertSceneLaunchProfileMock = vi.fn();
 const isHighConfidenceScriptMatchMock = vi.fn();
 const isSwitchEmulatorTargetMock = vi.fn();
@@ -57,9 +63,14 @@ vi.mock('./ui/ocr.js', () => ({
 }));
 
 vi.mock('./ui/front.js', () => ({
+    adoptStartupOverlayForAutomation: adoptStartupOverlayForAutomationMock,
     getOverlayRuntimeState: getOverlayRuntimeStateMock,
     runOverlayWithSource: runOverlayWithSourceMock,
     stopOverlay: stopOverlayMock,
+}));
+
+vi.mock('./active_game.js', () => ({
+    activeGame: { get: getActiveGameMock, hasSnapshot: hasActiveGameSnapshotMock },
 }));
 
 vi.mock('./ui/texthook.js', () => ({
@@ -81,12 +92,15 @@ vi.mock('./store.js', () => ({
     getObsOcrScenes: getObsOcrScenesMock,
     getIgnoreActiveSceneForOcr: getIgnoreActiveSceneForOcrMock,
     getForceManualOcrAllProfiles: getForceManualOcrAllProfilesMock,
+    getRunOverlayOnStartup: getRunOverlayOnStartupMock,
+    getRunOverlayWithActiveGame: getRunOverlayWithActiveGameMock,
     getSceneLaunchProfileForScene: getSceneLaunchProfileForSceneMock,
     getSteamGames: getSteamGamesMock,
     getTextractorPath32: getTextractorPath32Mock,
     getTextractorPath64: getTextractorPath64Mock,
     getYuzuGamesConfig: getYuzuGamesConfigMock,
     getGameExePathForScene: getGameExePathForSceneMock,
+    getWindowSceneSwitcherConfig: getWindowSceneSwitcherConfigMock,
     runtimeState: {
         get: vi.fn(),
     },
@@ -105,6 +119,7 @@ vi.mock('./agent_script_resolver.js', () => ({
 
 vi.mock('child_process', () => ({
     exec: vi.fn(),
+    execFile: vi.fn(),
     spawn: vi.fn(),
 }));
 
@@ -145,12 +160,21 @@ describe('AutoLauncher OCR scene activity fallback', () => {
         getObsOcrScenesMock.mockReset();
         getIgnoreActiveSceneForOcrMock.mockReset();
         getForceManualOcrAllProfilesMock.mockReset();
+        getRunOverlayOnStartupMock.mockReset();
+        getRunOverlayWithActiveGameMock.mockReset();
+        getRunOverlayWithActiveGameMock.mockReturnValue(false);
+        getActiveGameMock.mockReset();
+        getActiveGameMock.mockReturnValue(true);
+        hasActiveGameSnapshotMock.mockReset();
+        hasActiveGameSnapshotMock.mockReturnValue(false);
         getSceneLaunchProfileForSceneMock.mockReset();
         getSteamGamesMock.mockReset();
         getTextractorPath32Mock.mockReset();
         getTextractorPath64Mock.mockReset();
         getYuzuGamesConfigMock.mockReset();
         getGameExePathForSceneMock.mockReset();
+        getWindowSceneSwitcherConfigMock.mockReset();
+        getWindowSceneSwitcherConfigMock.mockReturnValue({ schemaVersion: 1, collections: [] });
         upsertSceneLaunchProfileMock.mockReset();
         isHighConfidenceScriptMatchMock.mockReset();
         isSwitchEmulatorTargetMock.mockReset();
@@ -178,6 +202,7 @@ describe('AutoLauncher OCR scene activity fallback', () => {
         getObsOcrScenesMock.mockReturnValue([]);
         getIgnoreActiveSceneForOcrMock.mockReturnValue(false);
         getForceManualOcrAllProfilesMock.mockReturnValue(false);
+        getRunOverlayOnStartupMock.mockReturnValue(false);
         getSceneLaunchProfileForSceneMock.mockReturnValue(null);
         getSteamGamesMock.mockReturnValue([]);
         getYuzuGamesConfigMock.mockReturnValue([]);
@@ -199,6 +224,59 @@ describe('AutoLauncher OCR scene activity fallback', () => {
             value: originalPlatform,
             configurable: true,
         });
+    });
+
+    it('passes Agent executable and script paths literally without a shell', async () => {
+        const { exec, execFile } = await import('child_process');
+        const child = { on: vi.fn() };
+        vi.mocked(exec).mockReturnValue(child as any);
+        vi.mocked(execFile).mockReturnValue(child as any);
+        const executable = String.raw`C:\Users\Sam %TEMP% & 日本語\Agent.exe`;
+        const script = String.raw`C:\Users\O'Brien\Scripts\$1 [game].js`;
+        getAgentPathMock.mockReturnValue(executable);
+        getLaunchAgentMinimizedMock.mockReturnValue(true);
+        const { AutoLauncher } = await loadAutoLauncherModule();
+        const launcher = new AutoLauncher() as any;
+
+        launcher.launchAgent(1234, script);
+
+        expect(execFile).toHaveBeenCalledWith(
+            executable,
+            [`--script=${script}`, '--pname=1234'],
+            { windowsHide: true },
+            expect.any(Function),
+        );
+        expect(launcher.agentProcess).toBe(child);
+    });
+
+    it('queries executable names literally without shell expansion', async () => {
+        const { execFile } = await import('child_process');
+        const name = "Sam's %TEMP% & [日本語].exe";
+        getAgentPathMock.mockReturnValue(`C:/Users/Sam/${name}`);
+        vi.mocked(execFile).mockImplementation(((_file: string, _args: string[], callback: Function) => {
+            callback(null, `"${name}","1234","Console","1","100,000 K"`);
+        }) as any);
+        const { AutoLauncher } = await loadAutoLauncherModule();
+        const launcher = new AutoLauncher() as any;
+
+        expect(await launcher.isAgentAlreadyRunning()).toBe(true);
+        expect(await launcher.isProcessRunningByName(name)).toBe(true);
+        expect(await launcher.getPidByProcessName(name)).toBe(1234);
+        expect(execFile).toHaveBeenCalledTimes(3);
+        expect(execFile).toHaveBeenCalledWith('tasklist', ['/FI', `IMAGENAME eq ${name}`, '/FO', 'CSV', '/NH'], expect.any(Function));
+    });
+
+    it('escapes regex characters when detecting a process on macOS', async () => {
+        Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+        const { execFile } = await import('child_process');
+        vi.mocked(execFile).mockImplementation(((_file: string, _args: string[], callback: Function) => {
+            callback(null, '1234\n');
+        }) as any);
+        const { AutoLauncher } = await loadAutoLauncherModule();
+        const launcher = new AutoLauncher() as any;
+
+        expect(await launcher.isProcessRunningByName('Sam [1] $game.exe')).toBe(true);
+        expect(execFile).toHaveBeenCalledWith('pgrep', [String.raw`^Sam \[1\] \$game$`], expect.any(Function));
     });
 
     it('does not probe OBS scene output when the current scene is not configured for OCR auto-launch', async () => {
@@ -390,7 +468,7 @@ describe('AutoLauncher OCR scene activity fallback', () => {
         }
     });
 
-    it('keeps an auto-launched overlay running regardless of scene inactivity', async () => {
+    it('stops an auto-launched overlay after confirmed session inactivity', async () => {
         const { AutoLauncher } = await loadAutoLauncherModule();
         const launcher = new AutoLauncher() as any;
         const scene = { id: 'scene-1', name: 'Scene 1' };
@@ -407,6 +485,7 @@ describe('AutoLauncher OCR scene activity fallback', () => {
         });
         getExecutableNameFromSourceMock.mockResolvedValue(null);
         sceneHasVisibleOutputMock.mockResolvedValue(false);
+        getActiveGameMock.mockReturnValue(false);
         getOverlayRuntimeStateMock.mockReturnValue({
             isRunning: true,
             source: 'auto-launcher',
@@ -417,24 +496,44 @@ describe('AutoLauncher OCR scene activity fallback', () => {
             nowSpy.mockReturnValue(1_000_000 + (60 * 60 * 1000));
             await launcher.runOverlayAutomation(scene);
 
-            expect(stopOverlayMock).not.toHaveBeenCalled();
+            expect(stopOverlayMock).toHaveBeenCalledWith({ onlyIfSource: 'auto-launcher' });
             expect(sceneHasVisibleOutputMock).not.toHaveBeenCalled();
         } finally {
             nowSpy.mockRestore();
         }
     });
 
-    it('stops auto-launched overlay when the active scene no longer enables overlay automation', async () => {
+    it.each([true, false])('leaves overlay lifecycle alone when Home startup is enabled (scene enabled: %s)', async (launchOverlay) => {
+        const { AutoLauncher } = await loadAutoLauncherModule();
+        const launcher = new AutoLauncher() as any;
+        getRunOverlayOnStartupMock.mockReturnValue(true);
+        getSceneLaunchProfileForSceneMock.mockReturnValue({ launchOverlay });
+        sceneHasVisibleOutputMock.mockResolvedValue(true);
+
+        await launcher.runOverlayAutomation({ id: 'scene-1', name: 'Scene 1' });
+
+        expect(runOverlayWithSourceMock).not.toHaveBeenCalled();
+        expect(stopOverlayMock).not.toHaveBeenCalled();
+        expect(sceneHasVisibleOutputMock).not.toHaveBeenCalled();
+    });
+
+    it.each([false, undefined])('stops a scene-launched overlay after switching to a scene with overlay automation %s', async (launchOverlay) => {
         const { AutoLauncher } = await loadAutoLauncherModule();
         const launcher = new AutoLauncher() as any;
         const scene = { id: 'scene-1', name: 'Scene 1' };
+
+        getSceneLaunchProfileForSceneMock.mockReturnValue({ launchOverlay: true });
+        sceneHasVisibleOutputMock.mockResolvedValue(true);
+        await launcher.runOverlayAutomation(scene);
+        expect(runOverlayWithSourceMock).toHaveBeenCalledWith('auto-launcher');
+        runOverlayWithSourceMock.mockClear();
 
         getSceneLaunchProfileForSceneMock.mockReturnValue({
             sceneId: scene.id,
             sceneName: scene.name,
             textHookMode: 'none',
             ocrMode: 'none',
-            launchOverlay: false,
+            launchOverlay,
             agentScriptPath: '',
             launchDelaySeconds: 0,
         });
@@ -444,10 +543,356 @@ describe('AutoLauncher OCR scene activity fallback', () => {
         });
         stopOverlayMock.mockReturnValue(true);
 
-        await launcher.runOverlayAutomation(scene);
+        await launcher.runOverlayAutomation({ id: 'scene-2', name: 'Scene 2' });
 
         expect(stopOverlayMock).toHaveBeenCalledWith({ onlyIfSource: 'auto-launcher' });
         expect(runOverlayWithSourceMock).not.toHaveBeenCalled();
+    });
+
+    it('runs the universal option without a per-game profile', async () => {
+        const { AutoLauncher } = await loadAutoLauncherModule();
+        const launcher = new AutoLauncher() as any;
+        getRunOverlayWithActiveGameMock.mockReturnValue(true);
+        await launcher.runOverlayAutomation({ id: 'scene-1', name: 'Game' });
+        expect(getActiveGameMock).toHaveBeenCalledWith('Game');
+        expect(runOverlayWithSourceMock).toHaveBeenCalledWith('auto-launcher');
+        expect(sceneHasVisibleOutputMock).not.toHaveBeenCalled();
+    });
+
+    it('does not start or stop on unknown capture evidence', async () => {
+        const { AutoLauncher } = await loadAutoLauncherModule();
+        const launcher = new AutoLauncher() as any;
+        getRunOverlayWithActiveGameMock.mockReturnValue(true);
+        getActiveGameMock.mockReturnValue(null);
+        await launcher.runOverlayAutomation({ id: 'scene-1', name: 'Game' });
+        getOverlayRuntimeStateMock.mockReturnValue({ isRunning: true, source: 'auto-launcher' });
+        await launcher.runOverlayAutomation({ id: 'scene-1', name: 'Game' });
+        expect(runOverlayWithSourceMock).not.toHaveBeenCalled();
+        expect(stopOverlayMock).not.toHaveBeenCalled();
+    });
+
+    it('uses shared evidence for OCR even if the process might still be running', async () => {
+        const { AutoLauncher } = await loadAutoLauncherModule();
+        const launcher = new AutoLauncher() as any;
+        hasActiveGameSnapshotMock.mockReturnValue(true);
+        getActiveGameMock.mockReturnValue(false);
+        await expect(launcher.isSceneSessionActive({ id: 'scene-1', name: 'Game' })).resolves.toBe(false);
+        expect(getExecutableNameFromSourceMock).not.toHaveBeenCalled();
+        expect(sceneHasVisibleOutputMock).not.toHaveBeenCalled();
+    });
+
+    it('does not let slow text-hook launches block overlay polling', async () => {
+        vi.useFakeTimers();
+        const { AutoLauncher } = await loadAutoLauncherModule();
+        const launcher = new AutoLauncher() as any;
+        getCurrentSceneMock.mockResolvedValue({ id: 'scene-1', name: 'Game' });
+        getRunOverlayWithActiveGameMock.mockReturnValue(true);
+        let finishHook!: (value: boolean) => void;
+        launcher.runTextHookAutomation = vi.fn(() => new Promise<boolean>((resolve) => { finishHook = resolve; }));
+        launcher.runOcrAutomation = vi.fn();
+        try {
+            launcher.startPolling();
+            await vi.advanceTimersByTimeAsync(1);
+            expect(runOverlayWithSourceMock).toHaveBeenCalled();
+            getOverlayRuntimeStateMock.mockReturnValue({ isRunning: true, source: 'auto-launcher' });
+            getActiveGameMock.mockReturnValue(false);
+            await vi.advanceTimersByTimeAsync(1000);
+            expect(stopOverlayMock).toHaveBeenCalledWith({ onlyIfSource: 'auto-launcher' });
+            finishHook(false);
+            await vi.advanceTimersByTimeAsync(1);
+        } finally {
+            launcher.stopPolling();
+            vi.useRealTimers();
+        }
+    });
+
+    const edenScene = { id: 'scene-eden', name: 'Tsukihime' };
+    const edenSnapshot = () => ({
+        hwnd: '4200', pid: 4242,
+        title: 'Eden | 月姫 -A piece of blue glass moon- | 1.0.0 (64-bit)',
+        executableName: 'eden.exe', executablePath: 'C:\\Eden\\eden.exe',
+        capturedAt: Date.now(), sequence: 1,
+    });
+
+    async function prepareEdenLauncher() {
+        const { AutoLauncher } = await loadAutoLauncherModule();
+        const launcher = new AutoLauncher() as any;
+        getCurrentSceneMock.mockResolvedValue(edenScene);
+        getExecutableNameFromSourceMock.mockResolvedValue('eden.exe');
+        isSwitchEmulatorTargetMock.mockImplementation((name: string) => /eden\.exe/i.test(name));
+        getProfileForMock.mockReturnValue({
+            sceneId: edenScene.id, exeName: 'eden.exe', engine: 'agent', autoHook: true,
+            agentScriptPath: 'C:\\scripts\\NS_Tsukihime.js',
+        });
+        getWindowSceneSwitcherConfigMock.mockReturnValue({ schemaVersion: 1, collections: [{
+            rules: [{ sceneUuid: edenScene.id, sceneName: edenScene.name,
+                titlePattern: 'Eden.*月姫 -A piece of blue glass moon-',
+                executableName: 'eden.exe', enabled: true, source: 'gsm-generated' }],
+        }] });
+        getRuntimeStatusMock.mockReturnValue({ running: false });
+        startHookSessionMock.mockResolvedValue({ success: true });
+        launcher.runOcrAutomation = vi.fn();
+        return launcher;
+    }
+
+    it('attaches a saved Eden Agent immediately on window and scene events without process polling', async () => {
+        vi.useFakeTimers();
+        const { exec, execFile } = await import('child_process');
+        const launcher = await prepareEdenLauncher();
+        const profile = getProfileForMock('eden.exe', edenScene.id);
+        getProfileForMock.mockReturnValue(null);
+        try {
+            launcher.startPolling();
+            await vi.advanceTimersByTimeAsync(1);
+            getProfileForMock.mockReturnValue(profile);
+            launcher.handleForegroundWindowChanged(edenSnapshot());
+            launcher.handleOBSSceneChanged();
+            await vi.advanceTimersByTimeAsync(1);
+            expect(startHookSessionMock).toHaveBeenCalledExactlyOnceWith({
+                engine: 'agent', exeName: 'eden.exe', pidOverride: 4242,
+                source: 'auto-launcher', sceneId: edenScene.id,
+            });
+            expect(exec).not.toHaveBeenCalled();
+            expect(execFile).not.toHaveBeenCalled();
+            launcher.handleForegroundWindowChanged({ ...edenSnapshot(), sequence: 2 });
+            await vi.advanceTimersByTimeAsync(1);
+            expect(startHookSessionMock).toHaveBeenCalledTimes(1);
+        } finally {
+            launcher.stopPolling();
+            vi.useRealTimers();
+        }
+    });
+
+    it('keeps an event arriving during a launcher pass and handles it without the polling delay', async () => {
+        vi.useFakeTimers();
+        const launcher = await prepareEdenLauncher();
+        let finish!: (value: boolean) => void;
+        launcher.runTextHookAutomation = vi.fn()
+            .mockImplementationOnce(() => new Promise<boolean>((resolve) => { finish = resolve; }))
+            .mockResolvedValue(false);
+        try {
+            launcher.startPolling();
+            await vi.advanceTimersByTimeAsync(1);
+            launcher.handleForegroundWindowChanged(edenSnapshot());
+            launcher.handleOBSSceneChanged();
+            expect(launcher.runTextHookAutomation).toHaveBeenCalledTimes(1);
+            finish(false);
+            await vi.advanceTimersByTimeAsync(1);
+            expect(launcher.runTextHookAutomation).toHaveBeenCalledTimes(2);
+        } finally {
+            launcher.stopPolling();
+            vi.useRealTimers();
+        }
+    });
+
+    it('does not let a slow OCR pass delay an Eden launch event', async () => {
+        vi.useFakeTimers();
+        const launcher = await prepareEdenLauncher();
+        launcher.runTextHookAutomation = vi.fn().mockResolvedValue(false);
+        let finishOcr!: () => void;
+        launcher.runOcrAutomation = vi.fn(() => new Promise<void>((resolve) => { finishOcr = resolve; }));
+        try {
+            launcher.startPolling();
+            await vi.advanceTimersByTimeAsync(1);
+            launcher.handleForegroundWindowChanged(edenSnapshot());
+            await vi.advanceTimersByTimeAsync(1);
+            expect(launcher.runTextHookAutomation).toHaveBeenCalledTimes(2);
+            finishOcr();
+        } finally {
+            launcher.stopPolling();
+            vi.useRealTimers();
+        }
+    });
+
+    it('does not wake a stopped launcher or wake for duplicate window events', async () => {
+        vi.useFakeTimers();
+        const launcher = await prepareEdenLauncher();
+        launcher.runTextHookAutomation = vi.fn().mockResolvedValue(false);
+        try {
+            launcher.handleForegroundWindowChanged(edenSnapshot());
+            launcher.handleOBSSceneChanged();
+            await vi.advanceTimersByTimeAsync(1);
+            expect(launcher.runTextHookAutomation).not.toHaveBeenCalled();
+            launcher.startPolling();
+            await vi.advanceTimersByTimeAsync(1);
+            launcher.handleForegroundWindowChanged({ ...edenSnapshot(), sequence: 2 });
+            await vi.advanceTimersByTimeAsync(1);
+            expect(launcher.runTextHookAutomation).toHaveBeenCalledTimes(1);
+            launcher.stopPolling();
+            launcher.handleOBSSceneChanged();
+            launcher.handleForegroundWindowChanged({ ...edenSnapshot(), sequence: 3 });
+            await vi.advanceTimersByTimeAsync(1);
+            expect(launcher.runTextHookAutomation).toHaveBeenCalledTimes(1);
+        } finally {
+            launcher.stopPolling();
+            vi.useRealTimers();
+        }
+    });
+
+    it('uses the foreground PID and Unicode title, then expires stale snapshots', async () => {
+        vi.useFakeTimers();
+        const { execFile } = await import('child_process');
+        vi.mocked(execFile).mockImplementation(((_file: string, _args: string[], callback: Function) => {
+            callback(null, '"eden.exe","9999","Console","1","100,000 K"');
+        }) as any);
+        const launcher = await prepareEdenLauncher();
+        try {
+            launcher.handleForegroundWindowChanged(edenSnapshot());
+            expect(await launcher.getPidByProcessName('EDEN.exe')).toBe(4242);
+            expect(await launcher.getLiveWindowTitle(4242)).toContain('月姫');
+            expect(execFile).not.toHaveBeenCalled();
+            await vi.advanceTimersByTimeAsync(3000);
+            expect(await launcher.getPidByProcessName('eden.exe')).toBe(9999);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('does not wait for missing processes inside the periodic launcher pass', async () => {
+        vi.useFakeTimers();
+        const { execFile } = await import('child_process');
+        vi.mocked(execFile).mockImplementation(((_file: string, _args: string[], callback: Function) => {
+            callback(null, 'INFO: No tasks are running which match the specified criteria.');
+        }) as any);
+        const launcher = await prepareEdenLauncher();
+        try {
+            const result = vi.fn();
+            void launcher.getPidByProcessName('missing.exe').then(result);
+            await vi.advanceTimersByTimeAsync(1);
+            expect(result).toHaveBeenCalledWith(-1);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it.each(['Eden', 'Eden | Another Game (64-bit)'])('does not inject a saved scene script into %s', async (title) => {
+        const launcher = await prepareEdenLauncher();
+        launcher.handleForegroundWindowChanged({ ...edenSnapshot(), title });
+        await launcher.runTextHookAutomation(edenScene);
+        expect(startHookSessionMock).not.toHaveBeenCalled();
+    });
+
+    it('honors a user stop when the Eden window emits another title event', async () => {
+        const launcher = await prepareEdenLauncher();
+        launcher.suppressedAutoTextHookSceneId = edenScene.id;
+        launcher.handleForegroundWindowChanged(edenSnapshot());
+        await launcher.runTextHookAutomation(edenScene);
+        expect(startHookSessionMock).not.toHaveBeenCalled();
+    });
+
+    it('reacts when the game title appears in an already-focused Eden window', async () => {
+        vi.useFakeTimers();
+        const launcher = await prepareEdenLauncher();
+        try {
+            launcher.handleForegroundWindowChanged({ ...edenSnapshot(), title: 'Eden' });
+            launcher.startPolling();
+            await vi.advanceTimersByTimeAsync(1);
+            expect(startHookSessionMock).not.toHaveBeenCalled();
+            launcher.handleForegroundWindowChanged({ ...edenSnapshot(), sequence: 2 });
+            await vi.advanceTimersByTimeAsync(1);
+            expect(startHookSessionMock).toHaveBeenCalledTimes(1);
+        } finally {
+            launcher.stopPolling();
+            vi.useRealTimers();
+        }
+    });
+
+    it('attaches from a background Eden title event using native architecture metadata', async () => {
+        vi.useFakeTimers();
+        const { exec, execFile } = await import('child_process');
+        const launcher = await prepareEdenLauncher();
+        const profile = getProfileForMock('eden.exe', edenScene.id);
+        getProfileForMock.mockReturnValue(null);
+        try {
+            launcher.startPolling();
+            await vi.advanceTimersByTimeAsync(1);
+            getProfileForMock.mockReturnValue(profile);
+            launcher.handleForegroundWindowChanged({ ...edenSnapshot(), executableName: 'explorer.exe', pid: 100 });
+            launcher.handleEmulatorWindowChanged({ ...edenSnapshot(), sequence: 2, processArchitecture: 'x64' });
+            await vi.advanceTimersByTimeAsync(1);
+            expect(startHookSessionMock).toHaveBeenCalledExactlyOnceWith({
+                engine: 'agent', exeName: 'eden.exe', pidOverride: 4242,
+                source: 'auto-launcher', sceneId: edenScene.id, archOverride: 'x64',
+            });
+            expect(exec).not.toHaveBeenCalled();
+            expect(execFile).not.toHaveBeenCalled();
+            expect(launcher.latestForeground.executableName).toBe('explorer.exe');
+        } finally {
+            launcher.stopPolling();
+            vi.useRealTimers();
+        }
+    });
+
+    it('expires background emulator snapshots and does not accept other process names', async () => {
+        vi.useFakeTimers();
+        const launcher = await prepareEdenLauncher();
+        const { execFile } = await import('child_process');
+        vi.mocked(execFile).mockImplementation(((_file: string, _args: string[], callback: Function) => {
+            callback(null, '"eden.exe","9999","Console","1","100,000 K"');
+        }) as any);
+        try {
+            launcher.handleEmulatorWindowChanged(edenSnapshot());
+            launcher.handleEmulatorWindowChanged({ ...edenSnapshot(), sequence: 2, pid: 1, executableName: 'other.exe' });
+            expect(await launcher.getPidByProcessName('eden.exe')).toBe(4242);
+            await vi.advanceTimersByTimeAsync(3000);
+            expect(await launcher.getPidByProcessName('eden.exe')).toBe(9999);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('ignores out-of-order snapshots and does not reuse a PID for a different executable', async () => {
+        const launcher = await prepareEdenLauncher();
+        const snapshot = edenSnapshot();
+        launcher.handleForegroundWindowChanged({ ...snapshot, sequence: 10 });
+        launcher.handleForegroundWindowChanged({ ...snapshot, pid: 1111, sequence: 9 });
+        expect(await launcher.getPidByProcessName('eden.exe')).toBe(4242);
+        const { execFile } = await import('child_process');
+        vi.mocked(execFile).mockImplementation(((_file: string, _args: string[], callback: Function) => {
+            callback(null, '"other.exe","9999","Console","1","100,000 K"');
+        }) as any);
+        expect(await launcher.getPidByProcessName('other.exe')).toBe(9999);
+    });
+
+    it('does not attach when the OBS scene changes during target validation', async () => {
+        const launcher = await prepareEdenLauncher();
+        launcher.handleForegroundWindowChanged(edenSnapshot());
+        getCurrentSceneMock.mockResolvedValueOnce(edenScene).mockResolvedValue({ id: 'other', name: 'Other' });
+        await launcher.runTextHookAutomation(edenScene);
+        expect(startHookSessionMock).not.toHaveBeenCalled();
+    });
+
+    it.each(['C:\\scripts\\NS_Tsukihime.js', 'c:/SCRIPTS/NS_Tsukihime.js'])('does not reattach an Agent already running %s', async (agentScriptPath) => {
+        const launcher = await prepareEdenLauncher();
+        launcher.handleForegroundWindowChanged(edenSnapshot());
+        getRuntimeStatusMock.mockReturnValue({
+            running: true, pid: 4242, exeName: 'eden.exe', engine: 'agent', source: 'auto-launcher',
+            agentScriptPath,
+        });
+        await launcher.runTextHookAutomation(edenScene);
+        expect(startHookSessionMock).not.toHaveBeenCalled();
+        expect(stopHookSessionAndWaitMock).not.toHaveBeenCalled();
+    });
+
+    it('preserves built-in Agent auto-hook for an arbitrary scene label without a scene-switcher rule', async () => {
+        const launcher = await prepareEdenLauncher();
+        launcher.handleForegroundWindowChanged(edenSnapshot());
+        getWindowSceneSwitcherConfigMock.mockReturnValue({ schemaVersion: 1, collections: [] });
+        await launcher.runTextHookAutomation(edenScene);
+        expect(startHookSessionMock).toHaveBeenCalledOnce();
+    });
+
+    it('switches the saved Agent script when another game used the same emulator PID', async () => {
+        const launcher = await prepareEdenLauncher();
+        launcher.handleForegroundWindowChanged(edenSnapshot());
+        getRuntimeStatusMock.mockReturnValue({
+            running: true, pid: 4242, exeName: 'eden.exe', engine: 'agent', source: 'auto-launcher',
+            agentScriptPath: 'C:\\scripts\\NS_OtherGame.js',
+        });
+        stopHookSessionAndWaitMock.mockResolvedValue({ success: true });
+        await launcher.runTextHookAutomation(edenScene);
+        expect(stopHookSessionAndWaitMock).toHaveBeenCalledOnce();
+        expect(startHookSessionMock).toHaveBeenCalledOnce();
     });
 
     it('uses the target emulator executable to guard configured Switch Agent launches', async () => {
