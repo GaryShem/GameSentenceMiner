@@ -24,7 +24,6 @@ class GoogleTranslateClient:
                     transient=False,
                 )
 
-
             target_lang = self.target_lang
 
             if request.metadata:
@@ -33,9 +32,7 @@ class GoogleTranslateClient:
                     target_lang,
                 )
 
-            self.logger.debug(
-                f"[GOOGLE TRANSLATE] Translating ja -> {target_lang}: {text_to_send[:100]}"
-            )
+            self.logger.debug(f"[GOOGLE TRANSLATE] Translating ja -> {target_lang}: {text_to_send[:100]}")
 
             translated = GoogleTranslator(
                 source="ja",
@@ -50,9 +47,7 @@ class GoogleTranslateClient:
 
             latency_ms = int((time.time() - start_time) * 1000)
 
-            self.logger.debug(
-                f"[GOOGLE TRANSLATE] Result: {translated[:100]}"
-            )
+            self.logger.debug(f"[GOOGLE TRANSLATE] Result: {translated[:100]}")
 
             return AIResponse(
                 provider=request.provider,
@@ -67,9 +62,7 @@ class GoogleTranslateClient:
             raise
 
         except Exception as e:
-            self.logger.exception(
-                f"Google Translate processing failed: {e}"
-            )
+            self.logger.exception(f"Google Translate processing failed: {e}")
             raise AIError(
                 f"Google Translate failed: {e}",
                 transient=True,

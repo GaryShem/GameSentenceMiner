@@ -1,4 +1,5 @@
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -115,8 +116,8 @@ def test_get_ocr_values_basic_mode(monkeypatch):
     monkeypatch.setattr(electron_config, "electron_store", store)
     monkeypatch.setattr(electron_config, "is_windows", lambda: True)
 
-    assert electron_config.get_ocr_ocr1() == "meiki_text_detector"
-    assert electron_config.get_ocr_ocr2() == "glens"
+    assert electron_config.get_ocr_ocr1() == "screenai"
+    assert electron_config.get_ocr_ocr2() == "screenai"
     assert electron_config.get_ocr_scan_rate() == 0.7
     assert electron_config.get_ocr_keep_newline() is True
     assert electron_config.get_ocr_keep_newline("secondary") is True
@@ -126,23 +127,36 @@ def test_get_ocr_values_basic_mode(monkeypatch):
 
 
 def test_basic_mode_ignores_stored_ocr1_but_advanced_mode_preserves_it(monkeypatch):
-    store = _DummyStore({"OCR": {"advancedMode": False, "ocr1": "screenai"}})
+    store = _DummyStore({"OCR": {"advancedMode": False, "ocr1": "oneocr"}})
     monkeypatch.setattr(electron_config, "electron_store", store)
     monkeypatch.setattr(electron_config, "is_windows", lambda: True)
 
-    assert electron_config.get_ocr_ocr1() == "meiki_text_detector"
-
-    store.data["OCR"]["advancedMode"] = True
     assert electron_config.get_ocr_ocr1() == "screenai"
 
+    store.data["OCR"]["advancedMode"] = True
+    assert electron_config.get_ocr_ocr1() == "oneocr"
 
-def test_default_stability_ocr_preserves_non_windows_platforms(monkeypatch):
+
+def test_default_stability_ocr_is_cross_platform(monkeypatch):
     monkeypatch.setattr(electron_config, "is_windows", lambda: False)
-    monkeypatch.setattr(electron_config.sys, "platform", "darwin")
-    assert electron_config.get_default_stability_ocr() == "alivetext"
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert electron_config.get_default_stability_ocr() == "screenai"
 
-    monkeypatch.setattr(electron_config.sys, "platform", "linux")
-    assert electron_config.get_default_stability_ocr() == "meiki_text_detector"
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert electron_config.get_default_stability_ocr() == "screenai"
+
+
+def test_basic_online_ocr_requires_explicit_opt_in_and_preserves_advanced_engines(monkeypatch):
+    store = _DummyStore({"OCR": {"advancedMode": False, "ocr2": "bing", "ocr2_basic": "glens"}})
+    monkeypatch.setattr(electron_config, "electron_store", store)
+    assert electron_config.get_ocr_ocr2() == "screenai"
+    store.data["OCR"]["useOnlineOcr"] = True
+    assert electron_config.get_ocr_ocr1() == "screenai"
+    assert electron_config.get_ocr_ocr2() == "glens"
+    store.data["OCR"]["advancedMode"] = True
+    assert electron_config.get_ocr_ocr2() == "bing"
+    store.data["OCR"].update(advancedMode=False, useOnlineOcr=False)
+    assert electron_config.get_ocr_ocr2() == "screenai"
 
 
 def test_get_ocr_values_advanced_mode(monkeypatch):
@@ -366,11 +380,13 @@ def test_get_ocr_hotkeys_preserve_explicit_empty_values(monkeypatch):
                 "manualOcrHotkey": "",
                 "menuOcrHotkey": "",
                 "areaSelectOcrHotkey": "",
+                "addAreaOcrHotkey": "",
                 "wholeWindowOcrHotkey": "",
                 "globalPauseHotkey": "",
                 "manualOcrGamepad": "",
                 "menuOcrGamepad": "",
                 "areaSelectOcrGamepad": "",
+                "addAreaOcrGamepad": "",
                 "wholeWindowOcrGamepad": "",
                 "globalPauseGamepad": "",
             }
@@ -381,6 +397,8 @@ def test_get_ocr_hotkeys_preserve_explicit_empty_values(monkeypatch):
     assert electron_config.get_ocr_manual_ocr_hotkey() == ""
     assert electron_config.get_ocr_menu_ocr_hotkey() == ""
     assert electron_config.get_ocr_area_select_ocr_hotkey() == ""
+    assert electron_config.get_ocr_add_area_ocr_hotkey() == ""
+    assert electron_config.get_ocr_add_area_ocr_gamepad() == ""
     assert electron_config.get_ocr_whole_window_ocr_hotkey() == ""
     assert electron_config.get_ocr_global_pause_hotkey() == ""
     assert electron_config.get_ocr_manual_ocr_gamepad() == ""
@@ -397,6 +415,8 @@ def test_get_ocr_hotkeys_use_defaults_when_missing(monkeypatch):
     assert electron_config.get_ocr_manual_ocr_hotkey() == "Ctrl+Shift+M"
     assert electron_config.get_ocr_menu_ocr_hotkey() == "Ctrl+Shift+G"
     assert electron_config.get_ocr_area_select_ocr_hotkey() == "Ctrl+Shift+O"
+    assert electron_config.get_ocr_add_area_ocr_hotkey() == "Alt+Shift+N"
+    assert electron_config.get_ocr_add_area_ocr_gamepad() == ""
     assert electron_config.get_ocr_whole_window_ocr_hotkey() == "Ctrl+Shift+W"
     assert electron_config.get_ocr_global_pause_hotkey() == "Ctrl+Shift+P"
     assert electron_config.get_ocr_manual_ocr_gamepad() == ""
@@ -404,6 +424,17 @@ def test_get_ocr_hotkeys_use_defaults_when_missing(monkeypatch):
     assert electron_config.get_ocr_area_select_ocr_gamepad() == ""
     assert electron_config.get_ocr_whole_window_ocr_gamepad() == ""
     assert electron_config.get_ocr_global_pause_gamepad() == ""
+
+
+def test_add_area_gamepad_binding_respects_gamepad_toggle(monkeypatch):
+    store = _DummyStore({"OCR": {"addAreaOcrHotkey": "Alt+N", "addAreaOcrGamepad": "3"}})
+    monkeypatch.setattr(electron_config, "electron_store", store)
+    assert electron_config.get_ocr_add_area_ocr_hotkey() == "Alt+N"
+    assert electron_config.get_ocr_gamepad_hotkeys_enabled() is True
+    assert electron_config.get_ocr_add_area_ocr_gamepad() == "3"
+    store.data["OCR"]["gamepadHotkeysEnabled"] = False
+    assert electron_config.get_ocr_add_area_ocr_gamepad() == ""
+    assert store.data["OCR"]["addAreaOcrGamepad"] == "3"
 
 
 def test_ocr_gamepad_hotkeys_infer_enabled_for_legacy_bindings(monkeypatch):

@@ -259,6 +259,98 @@ def test_hotkey_pause_uses_profile_gate_without_global_experimental_toggle(monke
     assert calls == [(4242, "Pause hotkey")]
 
 
+@pytest.fixture
+def confirmation_process_pause(monkeypatch, tmp_path):
+    from GameSentenceMiner.util.config.configuration import ProcessPausing
+
+    profile = SimpleNamespace(process_pausing=ProcessPausing(enabled=True))
+    profile.process_pausing.anki_confirmation_requests_pause = True
+    monkeypatch.setattr(feature_flags, "get_master_config", lambda: SimpleNamespace(get_config=lambda: profile))
+    monkeypatch.setattr(window_state_monitor, "get_config", lambda: profile)
+    monkeypatch.setattr(window_state_monitor, "is_windows", lambda: True)
+    monkeypatch.setattr(window_state_monitor, "user32", object())
+    monkeypatch.setattr(window_state_monitor, "_suspended_pids", {})
+    monkeypatch.setattr(window_state_monitor, "_overlay_pause_request_sources", set())
+    monkeypatch.setattr(window_state_monitor, "_overlay_pause_request_pid", None)
+    monkeypatch.setattr(window_state_monitor, "_last_process_pausing_activity_ts", 0.0)
+    monkeypatch.setattr(window_state_monitor, "_suspended_pids_file", tmp_path / "suspended_pids.json")
+    monkeypatch.setattr(
+        window_state_monitor, "_resolve_pause_target_pid", lambda *_args, **_kwargs: (4242, "windows_hwnd")
+    )
+    monkeypatch.setattr(window_state_monitor, "_is_pid_allowed_to_suspend", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(window_state_monitor, "_get_process_creation_time", lambda _pid: 42)
+    monkeypatch.setattr(window_state_monitor, "_get_process_exe_name", lambda _pid: "game.exe")
+    monkeypatch.setattr(window_state_monitor, "_process_matches_record", lambda _pid, _record: True)
+    monkeypatch.setattr(window_state_monitor, "_ensure_auto_resume_task", lambda: None)
+    suspended = []
+    resumed = []
+    monkeypatch.setattr(window_state_monitor, "_suspend_process", lambda pid: suspended.append(pid) or True)
+    monkeypatch.setattr(window_state_monitor, "_resume_process", lambda pid: resumed.append(pid) or True)
+    return profile.process_pausing, suspended, resumed
+
+
+@pytest.mark.parametrize("enabled,confirmation_enabled", [(False, False), (False, True), (True, False)])
+def test_anki_confirmation_process_pause_requires_both_settings(
+    confirmation_process_pause, enabled, confirmation_enabled
+):
+    config, suspended, resumed = confirmation_process_pause
+    config.enabled = enabled
+    config.anki_confirmation_requests_pause = confirmation_enabled
+
+    assert window_state_monitor.request_anki_confirmation_process_pause(True) is False
+    assert suspended == []
+    assert window_state_monitor.request_anki_confirmation_process_pause(False) is True
+    assert resumed == []
+
+
+@pytest.mark.parametrize("confirmation_closes_first", [False, True])
+def test_anki_confirmation_process_pause_shares_overlay_holds(confirmation_process_pause, confirmation_closes_first):
+    _config, suspended, resumed = confirmation_process_pause
+    assert window_state_monitor.request_overlay_process_pause("pause", source="manual") is True
+    assert window_state_monitor.request_anki_confirmation_process_pause(True) is True
+    assert suspended == [4242]
+
+    release_confirmation = lambda: window_state_monitor.request_anki_confirmation_process_pause(False)
+    release_overlay = lambda: window_state_monitor.request_overlay_process_pause("resume", source="manual")
+    first, last = (
+        (release_confirmation, release_overlay)
+        if confirmation_closes_first
+        else (release_overlay, release_confirmation)
+    )
+    assert first() is True
+    assert resumed == []
+    assert last() is True
+    assert resumed == [4242]
+    assert window_state_monitor._suspended_pids == {}
+
+
+def test_anki_confirmation_process_pause_releases_after_settings_disabled(confirmation_process_pause):
+    config, suspended, resumed = confirmation_process_pause
+    assert window_state_monitor.request_anki_confirmation_process_pause(True) is True
+    config.enabled = False
+    config.anki_confirmation_requests_pause = False
+
+    assert window_state_monitor.request_anki_confirmation_process_pause(False) is True
+    assert suspended == [4242]
+    assert resumed == [4242]
+    assert window_state_monitor._overlay_pause_request_sources == set()
+    assert window_state_monitor._suspended_pids == {}
+    persisted = json.loads(window_state_monitor._suspended_pids_file.read_text(encoding="utf-8"))
+    assert persisted["pids"] == []
+
+
+def test_anki_confirmation_close_does_not_release_a_later_manual_pause(confirmation_process_pause):
+    _config, suspended, resumed = confirmation_process_pause
+    assert window_state_monitor.request_anki_confirmation_process_pause(True) is True
+    assert window_state_monitor.toggle_active_game_pause() is True
+    assert window_state_monitor.toggle_active_game_pause() is True
+
+    assert window_state_monitor.request_anki_confirmation_process_pause(False) is True
+    assert suspended == [4242, 4242]
+    assert resumed == [4242]
+    assert 4242 in window_state_monitor._suspended_pids
+
+
 # ---------------------------------------------------------------------------
 # Linux / POSIX process pausing
 # ---------------------------------------------------------------------------
@@ -345,6 +437,46 @@ def test_resolve_linux_target_pid_returns_zero_without_target(monkeypatch):
     pid, source = window_state_monitor._resolve_linux_target_pid("test", log_on_missing=False)
     assert pid == 0
     assert source == "none"
+
+
+def _configured_target(monkeypatch, value):
+    monkeypatch.setattr(
+        window_state_monitor,
+        "get_config",
+        lambda: SimpleNamespace(process_pausing=SimpleNamespace(linux_target_process=value, denylist=[])),
+    )
+
+
+def test_scene_linux_target_keeps_the_executable_basename(monkeypatch):
+    monkeypatch.setattr(window_state_monitor, "_scene_linux_target", "")
+
+    assert window_state_monitor.set_scene_linux_target("S:\\Games\\Game\\Win64\\game_.exe") == "game_.exe"
+    assert window_state_monitor.set_scene_linux_target("/games/native-game/game") == "game"
+    assert window_state_monitor.set_scene_linux_target("  ") == ""
+
+
+def test_scene_linux_target_takes_precedence_over_configured(monkeypatch):
+    monkeypatch.setattr(window_state_monitor, "_scene_linux_target", "")
+    _configured_target(monkeypatch, "manual.exe")
+
+    window_state_monitor.set_scene_linux_target("/games/scene-game/scene-game")
+    assert window_state_monitor._get_configured_linux_target() == "scene-game"
+
+    window_state_monitor.set_scene_linux_target("")
+    assert window_state_monitor._get_configured_linux_target() == "manual.exe"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc process scan")
+def test_resolve_linux_target_pid_uses_scene_target(monkeypatch, sleeper):
+    monkeypatch.setattr(window_state_monitor, "_scene_linux_target", "")
+    monkeypatch.setattr(window_state_monitor, "is_windows", lambda: False)
+    monkeypatch.setattr(window_state_monitor, "_get_detected_game_exe", lambda: "")
+    _configured_target(monkeypatch, "not-running-game")
+
+    window_state_monitor.set_scene_linux_target("/usr/bin/sleep")
+    pid, source = window_state_monitor._resolve_linux_target_pid("test")
+    assert pid > 0
+    assert source == "config_name"
 
 
 import os as _os
@@ -1073,3 +1205,21 @@ def test_refine_proton_pid_returns_zero_on_psutil_error(monkeypatch):
 
     monkeypatch.setattr(window_state_monitor.psutil, "Process", _raise)
     assert window_state_monitor._refine_proton_pid(999) == 0
+
+
+def test_resuming_a_tracked_process_records_the_pause_span(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(
+        window_state_monitor,
+        "_suspended_pids",
+        {4242: {"created": 1, "exe": "game.exe", "suspended_at": 1000.0}},
+        raising=False,
+    )
+    monkeypatch.setattr(window_state_monitor, "_process_matches_record", lambda pid, record: True)
+    monkeypatch.setattr(window_state_monitor, "_resume_process", lambda pid: True)
+    monkeypatch.setattr(window_state_monitor, "_save_suspended_pids", lambda: None)
+    monkeypatch.setattr(window_state_monitor.time, "time", lambda: 1012.5)
+    monkeypatch.setattr(window_state_monitor.pause_history, "record_pause", lambda *span: recorded.append(span))
+
+    assert window_state_monitor._resume_tracked_process(4242, "test") is True
+    assert recorded == [(1000.0, 1012.5)]

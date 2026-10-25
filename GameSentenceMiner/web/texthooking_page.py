@@ -8,6 +8,7 @@ import textwrap
 import threading
 import time
 import webbrowser
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import flask
@@ -15,8 +16,11 @@ from flask import jsonify, render_template, request, send_file, send_from_direct
 from waitress import create_server
 
 from GameSentenceMiner import obs
-from GameSentenceMiner.ai.ai_prompting import get_ai_prompt_result
+from GameSentenceMiner.ai.ai_prompting import get_ai_prompt_result, get_sentence_analysis
+from GameSentenceMiner.ai.prompts.presets import STUDY_TASKS
+from GameSentenceMiner.ai.setup import AI_SETUP_DOCS_URL, ai_setup_required, ai_error_message, open_ai_settings
 from GameSentenceMiner.obs import get_current_game
+from GameSentenceMiner.util.concurrency.work_pool import submit_background_work
 from GameSentenceMiner.util.config.configuration import (
     get_config,
     gsm_state,
@@ -72,7 +76,7 @@ _waitress_servers = []
 _waitress_threads = []
 _waitress_lock = threading.RLock()
 _ws_invalid_upgrade_filter_installed = False
-AI_TRANSLATION_SETUP_DOCS_URL = "https://docs.gamesentenceminer.com/docs/guides/ai-features"
+AI_TRANSLATION_SETUP_DOCS_URL = AI_SETUP_DOCS_URL
 
 app = flask.Flask(__name__, static_folder="static", static_url_path="/static")
 
@@ -174,7 +178,7 @@ def _find_free_port(bind_host: str) -> int:
         return int(sock.getsockname()[1])
 
 
-def _run_waitress_server(host: str, bind_port: int):
+def _run_waitress_server(host: str, bind_port: int, *, on_ready: Callable[[], None] | None = None):
     server = None
     try:
         server = create_server(
@@ -186,6 +190,10 @@ def _run_waitress_server(host: str, bind_port: int):
         )
         with _waitress_lock:
             _waitress_servers.append(server)
+        # create_server has bound and activated the listener; requests can now
+        # queue while run() starts processing them.
+        if on_ready is not None:
+            on_ready()
         server.run()
     except Exception as waitress_error:
         logger.error(f"Internal waitress server crashed on {host}:{bind_port}: {waitress_error}")
@@ -208,7 +216,9 @@ def _wait_for_tcp_port(host: str, bind_port: int, timeout_seconds: float = 6.0) 
     return False
 
 
-def _try_start_single_port_gateway(host: str, external_port: int) -> bool:
+def _try_start_single_port_gateway(
+    host: str, external_port: int, *, on_ready: Callable[[], None] | None = None
+) -> bool:
     """
     Single-port mode:
       - Keep waitress and the websocket manager as-is on their internal ports.
@@ -516,6 +526,8 @@ def _try_start_single_port_gateway(host: str, external_port: int) -> bool:
             await site.start()
             _single_port_gateway_active = True
             _single_port_gateway_port = external_port
+            if on_ready is not None:
+                on_ready()
             await stop_event.wait()
         finally:
             _single_port_gateway_active = False
@@ -1011,7 +1023,7 @@ def get_screenshot():
 
         handle_texthooker_button(gsm_state.previous_replay)
     else:
-        obs.save_replay_buffer()
+        _save_replay_for([line])
     return jsonify({}), 200
 
 
@@ -1076,7 +1088,7 @@ def play_audio():
     ):
         handle_texthooker_button(gsm_state.previous_replay)
     else:
-        obs.save_replay_buffer()
+        _save_replay_for([line])
     return jsonify({"queued": True, "line_id": event_id}), 200
 
 
@@ -1113,9 +1125,39 @@ def trim_video():
     ):
         handle_texthooker_button(gsm_state.previous_replay)
     else:
-        obs.save_replay_buffer()
+        _save_replay_for([line])
 
     return jsonify({"queued": True, "line_id": event_id}), 200
+
+
+def _save_replay_for(lines):
+    """Run the queued Text Feed action on a saved clip once lines left the buffer, else save an OBS replay."""
+    from GameSentenceMiner import clip_cards
+    from GameSentenceMiner.web.service import handle_texthooker_button
+
+    if clip_replay := clip_cards.replay_for_lines(lines):
+        handle_texthooker_button(clip_replay)
+    else:
+        obs.save_replay_buffer()
+
+
+def _missing_output_folder_response():
+    """No destination configured: open the settings to the Paths tab so the user can set one."""
+    try:
+        settings_window = gsm_state.config_app
+        if settings_window is None:
+            factory = getattr(gsm_state, "config_app_factory", None)
+            settings_window = factory() if callable(factory) else None
+        if settings_window:
+            settings_window.show_window(root_tab_key="general", subtab_key="paths")
+    except Exception as e:
+        logger.debug(f"Failed to open settings for output folder: {e}")
+    return jsonify(
+        {
+            "error": ("No output folder is set. Set an Output Folder in the Paths settings, then try again."),
+            "open_settings": True,
+        }
+    ), 400
 
 
 @app.route("/create-media", methods=["POST"])
@@ -1127,22 +1169,7 @@ def create_media():
     trim_with_vad = bool(data.get("trim_with_vad", False))
 
     if not get_config().paths.output_folder:
-        # No destination configured: open the settings to the Paths tab so the user can set one.
-        try:
-            settings_window = gsm_state.config_app
-            if settings_window is None:
-                factory = getattr(gsm_state, "config_app_factory", None)
-                settings_window = factory() if callable(factory) else None
-            if settings_window:
-                settings_window.show_window(root_tab_key="general", subtab_key="paths")
-        except Exception as e:
-            logger.debug(f"Failed to open settings for output folder: {e}")
-        return jsonify(
-            {
-                "error": ("No output folder is set. Set an Output Folder in the Paths settings, then try again."),
-                "open_settings": True,
-            }
-        ), 400
+        return _missing_output_folder_response()
 
     lines = [line for event_id in ids if (line := get_event_line_by_id(event_id)) is not None]
     if not lines:
@@ -1175,9 +1202,65 @@ def create_media():
     if reuse_replay:
         handle_texthooker_button(gsm_state.previous_replay)
     else:
-        obs.save_replay_buffer()
+        _save_replay_for(lines)
 
     return jsonify({"queued": True, "count": len(lines)}), 200
+
+
+def _queue_clip_save(line, wait_seconds):
+    """Save an OBS replay once it covers the line; the replay handler writes the clip."""
+    from GameSentenceMiner.util import clips
+
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+
+    def schedule(delay):
+        timer = threading.Timer(min(max(0.0, delay), 0.5), run)
+        timer.daemon = True
+        timer.start()
+
+    def run():
+        remaining = min(deadline - time.monotonic(), clips.seconds_until_clip_ready(line))
+        if remaining > 0:
+            schedule(remaining)
+            return
+        gsm_state.pending_clip_saves.append(line)
+        try:
+            obs.save_replay_buffer()
+        except Exception as e:
+            logger.exception(f"Failed to save OBS replay for Save clip for later: {e}")
+            if line in gsm_state.pending_clip_saves:
+                gsm_state.pending_clip_saves.remove(line)
+            from GameSentenceMiner.web.service import _send_texthooker_audio_event
+
+            _send_texthooker_audio_event(
+                "clip_save_failed", line_ids=[line.id], error=f"Could not save the OBS replay: {e}"
+            )
+
+    schedule(wait_seconds)
+
+
+@app.route("/save-clip", methods=["POST"])
+def save_clip():
+    """Keep the line as an OBS-shaped clip plus manifest, so a card can be made from it later."""
+    from GameSentenceMiner.util import clips
+
+    event_id = (request.get_json() or {}).get("id")
+    if not event_id:
+        return jsonify({"error": "Missing id"}), 400
+    if not get_config().paths.output_folder:
+        return _missing_output_folder_response()
+
+    line = get_event_line_by_id(event_id)
+    if line is None:
+        return jsonify({"error": "Invalid id"}), 400
+
+    existing = clips.find_clip_folder(clips.get_clips_root(), line)
+    if existing:
+        return jsonify({"queued": False, "already_saved": True, "line_ids": [line.id], "folder": existing}), 200
+
+    wait_seconds = clips.seconds_until_clip_ready(line)
+    _queue_clip_save(line, wait_seconds)
+    return jsonify({"queued": True, "line_ids": [line.id], "wait_seconds": wait_seconds}), 200
 
 
 @app.route("/texthooker/audio/<token>", methods=["GET"])
@@ -1227,9 +1310,9 @@ def translate_line():
       400:
         description: Invalid request or AI not configured
     """
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     event_id = data.get("id")
-    text = data.get("text", "").strip()
+    text = str(data.get("text") or "").strip()
     if event_id is None:
         return jsonify({"error": "Missing id"}), 400
 
@@ -1251,15 +1334,7 @@ def translate_line():
         """)
 
     if not get_config().ai.is_configured():
-        return jsonify(
-            {
-                "error": (
-                    'AI translation is not set up yet. Configure it in the "AI / Translation" '
-                    "tab of Config, then try again."
-                ),
-                "href": AI_TRANSLATION_SETUP_DOCS_URL,
-            }
-        ), 400
+        return jsonify(ai_setup_required(automatic=data.get("automatic") is True)), 400
     line = get_event_line_by_id(event_id)
     if line is None:
         return jsonify({"error": "Invalid id"}), 400
@@ -1271,6 +1346,8 @@ def translate_line():
         get_current_game(),
         custom_prompt=prompt,
     )
+    if not translation or translation.startswith("Processing failed:"):
+        return jsonify({"error": ai_error_message(translation), "code": "ai_request_failed"}), 502
     line.set_TL(translation)
     return jsonify({"TL": translation}), 200
 
@@ -1304,23 +1381,17 @@ def translate_multiple():
       500:
         description: Translation failed
     """
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     event_ids = data.get("ids", [])
     if not event_ids:
         return jsonify({"error": "Missing ids"}), 400
 
     if not get_config().ai.is_configured():
-        return jsonify(
-            {
-                "error": (
-                    'AI translation is not set up yet. Configure it in the "AI / Translation" '
-                    "tab of Config, then try again."
-                ),
-                "href": AI_TRANSLATION_SETUP_DOCS_URL,
-            }
-        ), 400
+        return jsonify(ai_setup_required(automatic=data.get("automatic") is True)), 400
 
     lines = [line for event_id in event_ids if (line := get_event_line_by_id(event_id)) is not None]
+    if not lines:
+        return jsonify({"error": "No matching lines found"}), 400
 
     text = "\n".join(line.text for line in lines)
 
@@ -1348,7 +1419,42 @@ def translate_multiple():
         custom_prompt=translate_multiple_lines_prompt,
     )
 
+    if not translation or translation.startswith("Processing failed:"):
+        return jsonify({"error": ai_error_message(translation), "code": "ai_request_failed"}), 502
     return translation, 200
+
+
+@app.route("/ai/open-settings", methods=["POST"])
+def open_ai_setup():
+    opened = open_ai_settings()
+    return jsonify({"settings_opened": opened, "href": AI_TRANSLATION_SETUP_DOCS_URL}), 200
+
+
+@app.route("/analyze-line", methods=["POST"])
+def analyze_line():
+    data = request.get_json(silent=True) or {}
+    event_id = data.get("id")
+    mode = data.get("mode", "sentence")
+    question = data.get("question", "")
+    if event_id is None or not isinstance(mode, str) or mode not in {*STUDY_TASKS, "custom"}:
+        return jsonify({"error": "Choose a sentence and a valid analysis mode."}), 400
+    if not isinstance(question, str) or len(question) > 4000 or (mode == "custom" and not question.strip()):
+        return jsonify({"error": "Enter a question of 1–4000 characters."}), 400
+    if not get_config().ai.is_configured():
+        return jsonify(ai_setup_required(automatic=data.get("automatic") is True)), 400
+    line = get_event_line_by_id(event_id)
+    if line is None:
+        return jsonify({"error": "Invalid id"}), 400
+    text = data.get("text") or line.text
+    if not isinstance(text, str) or not text.strip():
+        return jsonify({"error": "No sentence available to explain."}), 400
+    try:
+        result = get_sentence_analysis(get_all_lines(), text, line, get_current_game(), mode=mode, question=question)
+        if not result:
+            raise ValueError("Empty AI response")
+        return jsonify({"analysis": result, "mode": mode}), 200
+    except Exception as exc:
+        return jsonify({"error": ai_error_message(exc), "code": "ai_request_failed"}), 502
 
 
 @app.route("/get_status", methods=["GET"])
@@ -1417,6 +1523,16 @@ def linux_set_target_process():
     except Exception as e:
         logger.error(f"Failed to set linux_target_process: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/linux/set_scene_target_process", methods=["POST"])
+def linux_set_scene_target_process():
+    """Hold the active scene's game-exe basename as the pause target, without saving it."""
+    from GameSentenceMiner.util.platform.base_window_monitor import set_scene_linux_target
+
+    data = request.get_json(silent=True) or {}
+    basename = set_scene_linux_target(str(data.get("target") or ""))
+    return jsonify({"success": True, "scene_target_process": basename}), 200
 
 
 @app.template_filter("datetimeformat")
@@ -1547,7 +1663,12 @@ def get_event_line_by_id(event_id: str):
         return line
 
     event = event_manager.get(event_id)
-    return event.line if event else None
+    if event:
+        return event.line
+    # A saved line outlives the session's text log.
+    from GameSentenceMiner.util import clips
+
+    return clips.find_saved_line(event_id)
 
 
 def are_lines_selected():
@@ -1695,14 +1816,7 @@ def _start_legacy_moved_page_server():
     logger.info(f"Legacy moved-page server active on {host}:{legacy_port} (current texthooker port: {current_port}).")
 
 
-def start_web_server(debug=False):
-    logger.debug("Starting web server...")
-    start_default_websocket_server()
-
-    log = logging.getLogger("werkzeug")
-    log.setLevel(logging.ERROR)  # Set to ERROR to suppress most logs
-    _start_legacy_moved_page_server()
-
+def _open_texthooker_on_startup():
     # A browser launched by an elevated process can inherit its admin context.
     # Keep the saved preference so it applies again on a normal GSM launch.
     if get_config().general.open_multimine_on_startup:
@@ -1713,7 +1827,18 @@ def start_web_server(debug=False):
                 f"or open http://localhost:{_get_single_port()} in your browser."
             )
         else:
-            open_texthooker()
+            # Browser launch can block. Keep the HTTP server free to serve the
+            # first request, including the standalone gateway's event loop.
+            submit_background_work(open_texthooker)
+
+
+def start_web_server(debug=False):
+    logger.debug("Starting web server...")
+    start_default_websocket_server()
+
+    log = logging.getLogger("werkzeug")
+    log.setLevel(logging.ERROR)  # Set to ERROR to suppress most logs
+    _start_legacy_moved_page_server()
 
     # FOR TEXTHOOKER DEVELOPMENT, UNCOMMENT THE FOLLOWING LINE WITH Flask-CORS INSTALLED:
     # from flask_cors import CORS
@@ -1721,11 +1846,11 @@ def start_web_server(debug=False):
     host = get_config().advanced.localhost_bind_address
     single_port = _get_single_port()
     if _is_single_port_experiment_enabled():
-        if _try_start_single_port_gateway(host, single_port):
+        if _try_start_single_port_gateway(host, single_port, on_ready=_open_texthooker_on_startup):
             return
         logger.warning("Single-port gateway unavailable; continuing with default waitress mode.")
 
-    _run_waitress_server(host, single_port)
+    _run_waitress_server(host, single_port, on_ready=_open_texthooker_on_startup)
 
 
 def stop_web_server(timeout: float = 5.0) -> None:

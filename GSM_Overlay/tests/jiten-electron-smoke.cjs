@@ -14,7 +14,8 @@ const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gsm-jiten-smoke-'));
 app.setPath('userData', path.join(directory, 'profile'));
 app.commandLine.appendSwitch('host-resolver-rules', 'MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1');
 app.commandLine.appendSwitch('disable-background-networking');
-const timeout = setTimeout(() => { console.error('Electron Jiten smoke test timed out'); app.exit(1); }, 25_000);
+let stage = 'startup';
+const timeout = setTimeout(() => { console.error(`Electron Jiten smoke test timed out during ${stage}`); app.exit(1); }, 25_000);
 
 app.whenReady().then(async () => {
   const calls = [];
@@ -109,6 +110,7 @@ app.whenReady().then(async () => {
     window.top.postMessage({type:'gsm-test-ready'}, '*');
   `);
   const extension = await ses.extensions.loadExtension(extensionDirectory, { allowFileAccess: true });
+  stage = 'service worker and renderer requests';
   const window = new BrowserWindow({ show: false, webPreferences: { session: ses } });
   await window.loadURL(`chrome-extension://${extension.id}/probe.html`);
   const [worker, renderer] = await Promise.all([
@@ -136,6 +138,7 @@ app.whenReady().then(async () => {
   })()`);
   assert.equal(retryStatus, 200);
   assert.equal(writes, 1);
+  stage = 'popup grading';
   // Use the actual custom GSM/Yomitan sender, overlay reply handler, and main
   // IPC handlers. The popup is an extension iframe inside a Node-enabled page.
   const mainSource = fs.readFileSync(path.join(moduleRoot, 'main.js'), 'utf8');
@@ -157,6 +160,7 @@ app.whenReady().then(async () => {
   const hostPath = path.join(directory, 'grading-host.html');
   fs.writeFileSync(hostPath, '<!doctype html><body></body>');
   await gradingWindow.loadFile(hostPath);
+  await gradingWindow.webContents.executeJavaScript(fs.readFileSync(path.join(__dirname, '../dictionary_navigation.js'), 'utf8') + '\nvoid 0;');
   await gradingWindow.webContents.executeJavaScript(fs.readFileSync(path.join(__dirname, '../gamepad.js'), 'utf8') + '\nvoid 0;');
   const gradeResult = await gradingWindow.webContents.executeJavaScript(`
     const ipcRenderer = require('electron').ipcRenderer;
@@ -168,7 +172,7 @@ app.whenReady().then(async () => {
     const applyOptimisticHighlightState = () => {};
     ${handlerSource}
     const handler = Object.create(GamepadHandler.prototype);
-    Object.assign(handler, {yomitanPopupVisible: true, popupActionSelectionActive: true, thumbstickLatch: new Map()});
+    Object.assign(handler, {config: {}, dictionaryPopupVisible: true, popupActionSelectionActive: true, thumbstickLatch: new Map()});
     const selections = [];
     new Promise(resolve => {
       window.addEventListener('message', event => {
@@ -176,13 +180,13 @@ app.whenReady().then(async () => {
         if(event.data.type === 'gsm-test-selection') selections.push(event.data);
         if(event.data.type === 'gsm-test-done') resolve({ tone: event.data.tone, text: event.data.text, selections });
         if(event.data.type === 'gsm-test-ready') {
-          handler.resetYomitanPopupActionSelection();
-          handler.navigateYomitanNextEntry();
-          handler.navigateYomitanPrevEntry();
-          handler.navigateYomitanPrevEntry();
-          handler.navigateYomitanPrevEntry();
-          handler.navigateYomitanNextEntry();
-          handler.navigateYomitanPrevEntry();
+          handler.resetDictionaryPopupActionSelection();
+          handler.navigateDictionaryNextEntry();
+          handler.navigateDictionaryPrevEntry();
+          handler.navigateDictionaryPrevEntry();
+          handler.navigateDictionaryPrevEntry();
+          handler.navigateDictionaryNextEntry();
+          handler.navigateDictionaryPrevEntry();
           handler.processRightStickHorizontalForPopup(-1, 0.6);
           handler.processRightStickHorizontalForPopup(0, 0.6);
           handler.processRightStickHorizontalForPopup(1, 0.6);

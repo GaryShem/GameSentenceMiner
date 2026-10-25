@@ -1676,6 +1676,7 @@ from GameSentenceMiner.util.database.game_daily_rollup_table import GameDailyRol
 from GameSentenceMiner.util.database.stats_rollup_table import StatsRollupTable  # noqa: E402
 from GameSentenceMiner.util.database.stats_export_state_table import StatsExportStateTable  # noqa: E402
 from GameSentenceMiner.util.database.third_party_stats_table import ThirdPartyStatsTable  # noqa: E402
+from GameSentenceMiner.util.database.reading_breaks_table import ReadingBreaksTable
 
 _DATABASE_TABLE_CLASSES = [
     AIModelsTable,
@@ -1687,6 +1688,7 @@ _DATABASE_TABLE_CLASSES = [
     StatsRollupTable,
     StatsExportStateTable,
     ThirdPartyStatsTable,
+    ReadingBreaksTable,
 ]
 for cls in _DATABASE_TABLE_CLASSES:
     # Binding is read-only from an import-lifecycle perspective. Application
@@ -1759,6 +1761,9 @@ def check_and_run_migrations():
         This powers incremental cloud sync without scanning all game lines.
         """
         sync_table = GameLinesTable._sync_changes_table
+        from GameSentenceMiner.util.cloud_sync.store import install_tracking
+
+        install_tracking(GameLinesTable._db)
         GameLinesTable._db.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {sync_table} (

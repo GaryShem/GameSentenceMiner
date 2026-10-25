@@ -1,4 +1,4 @@
-import { exec, spawn } from 'child_process';
+import { spawn } from 'child_process';
 import { dialog, ipcMain, BrowserWindow, screen, IpcMainEvent, clipboard, shell } from 'electron';
 import {
     getAutoUpdateElectron,
@@ -31,6 +31,8 @@ import {
     sendOcrStatus,
 } from '../main.js';
 import { getCurrentScene, ObsScene } from './obs.js';
+import { createOcrPreviewService } from './ocr-preview.js';
+import { createOcrAreaSaver } from './ocr-areas.js';
 import { bus } from '../runtime/bus_client.js';
 import { getProcessManager } from '../runtime/process_supervisor.js';
 import {
@@ -88,6 +90,9 @@ function diffOcrConfigValues(previousConfig: Record<string, any>, nextConfig: Re
 }
 
 function blockOcrStartDuringUpdate(action: string): boolean {
+    if (isQuitting) {
+        return true;
+    }
     if (!isPythonLaunchBlockedByUpdate()) {
         return false;
     }
@@ -183,6 +188,7 @@ function sendToMainWindowFrames(channel: string, ...args: any[]) {
 function appendHotkeyArgs(command: string[], ocr_config: ReturnType<typeof getOCRConfig>) {
     // Always pass explicit values so empty strings can disable hotkeys.
     command.push('--area_select_ocr_hotkey', `${ocr_config.areaSelectOcrHotkey ?? ''}`);
+    command.push('--add_area_ocr_hotkey', `${ocr_config.addAreaOcrHotkey ?? 'Alt+Shift+N'}`);
     command.push('--manual_ocr_hotkey', `${ocr_config.manualOcrHotkey ?? ''}`);
     command.push('--menu_ocr_hotkey', `${ocr_config.menuOcrHotkey ?? ''}`);
     command.push('--whole_window_ocr_hotkey', `${ocr_config.wholeWindowOcrHotkey ?? ''}`);
@@ -488,6 +494,11 @@ async function runScreenSelector(options?: { live?: boolean }) {
             }
         });
 
+        process.stderr?.on('data', (data: Buffer) => {
+            console.error(`[Screen Selector STDERR]: ${data.toString()}`);
+            sendToMainWindowFrames('ocr-log', data.toString());
+        });
+
         process.on('close', (code) => {
             console.log(`Screen selector exited with code ${code}`);
             if (code === 0) {
@@ -684,6 +695,10 @@ export function stopOCR(options: OCRStopOptions): boolean {
         ocrStopRequested = true;
         void getProcessManager().stop(OCR_CLIENT_ID, {
             gracefulStopData: buildOcrStopCommand(options.reason),
+        }).catch((error) => {
+            console.error('[OCR] Failed to stop process:', error);
+            const message = error instanceof Error ? error.message : String(error);
+            sendToMainWindowFrames('ocr-ipc-error', `Failed to stop OCR: ${message}`);
         });
         return true;
     }
@@ -769,6 +784,15 @@ function writeOCRReplacements(replacements: Record<string, string>) {
 }
 
 export function registerOCRUtilsIPC() {
+    const getPreview = createOcrPreviewService(bus);
+    ipcMain.handle('ocr.get-preview', (_event, request) => getPreview(request));
+    const saveAreas = createOcrAreaSaver({
+        getScene: getCurrentScene,
+        getPath: getSceneOCRConfig,
+        backup: backupOCRConfig,
+        reload: () => requestOcrConfigReload('preview-area-edit', { reloadArea: true, reloadElectron: false, force: true }),
+    });
+    ipcMain.handle('ocr.save-preview-areas', (_event, request) => saveAreas(request));
     ipcMain.handle('ocr-replacements.load', async () => {
         try {
             return readOCRReplacements();
@@ -898,7 +922,8 @@ export function registerOCRUtilsIPC() {
     ipcMain.handle('ocr.open-config-json', async () => {
         try {
             const ocrConfigPath = await getActiveOCRConfigPath();
-            exec(`start "" "${ocrConfigPath}"`); // Opens the file with the default editor
+            const error = await shell.openPath(ocrConfigPath);
+            if (error) throw new Error(error);
             return true;
         } catch (error: any) {
             console.error('Error opening config file:', error.message);
@@ -908,7 +933,8 @@ export function registerOCRUtilsIPC() {
 
     ipcMain.handle('ocr.open-config-folder', async () => {
         try {
-            exec(`start "" "${path.join(BASE_DIR, 'ocr_config')}"`); // Opens the folder in Explorer
+            const error = await shell.openPath(path.join(BASE_DIR, 'ocr_config'));
+            if (error) throw new Error(error);
             return true;
         } catch (error: any) {
             console.error('Error opening config folder:', error.message);
@@ -1220,6 +1246,10 @@ export function registerOCRUtilsIPC() {
 
     ipcMain.on('ocr.area-select-ocr', () => {
         sendOcrCommand('area_select_ocr');
+    });
+
+    ipcMain.on('ocr.add-area', () => {
+        sendOcrCommand('add_ocr_area');
     });
 
     ipcMain.on('ocr.get-status', () => {

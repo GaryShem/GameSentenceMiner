@@ -43,6 +43,7 @@ from GameSentenceMiner.util.config.configuration import (
 from GameSentenceMiner.util.config.feature_flags import (
     process_pausing_feature,
 )
+from GameSentenceMiner.util.media import pause_history
 from GameSentenceMiner.util.platform.monitor_selection import (
     get_mss_monitor_descriptors,
     set_overlay_monitor_identity_from_index,
@@ -443,6 +444,10 @@ _CRITICAL_DENYLIST: List[str] = [
 # Emit the Wayland auto-detection warning at most once per session.
 _wayland_warn_shown: bool = False
 
+# The active OBS scene's Game executable, set by Electron on each scene change. Held in memory
+# only: it overrides process_pausing.linux_target_process without replacing a value set by hand.
+_scene_linux_target: str = ""
+
 _window_state_monitor: Optional["BaseWindowStateMonitor"] = None
 _suspended_pids: Dict[int, Dict[str, Any]] = {}  # pid -> {'suspended_at': float, 'created': int, 'exe': str}
 _suspended_pids_lock = threading.RLock()
@@ -450,6 +455,7 @@ _auto_resume_thread: Optional[threading.Thread] = None
 _suspended_pids_file: Optional[Path] = None
 _overlay_pause_request_sources: Set[str] = set()
 _overlay_pause_request_pid: Optional[int] = None
+_ANKI_CONFIRMATION_PAUSE_SOURCE = "anki_confirmation"
 _last_process_pausing_activity_ts: float = 0.0
 
 
@@ -500,7 +506,7 @@ def _load_suspended_pids():
                         logger.warning(f"Skipping resume for PID {pid}: process does not match recorded info.")
                         continue
 
-                    if _resume_process(pid):
+                    if _resume_and_record(pid, record):
                         logger.info(f"Resumed orphaned suspended process PID {pid} from previous session.")
                     else:
                         logger.debug(f"Could not resume PID {pid} (may have already terminated).")
@@ -515,18 +521,26 @@ def _load_suspended_pids():
             _last_process_pausing_activity_ts = 0.0
 
 
-@process_pausing_feature()
 def _save_suspended_pids():
-    """Save currently suspended PIDs to disk."""
+    """Persist tracking even if pausing was disabled while a pause request was active."""
     try:
         with _suspended_pids_lock:
             entries = [{"pid": pid, **info} for pid, info in _suspended_pids.items()]
-        pids_file = _get_suspended_pids_file()
+        pids_file = _get_suspended_pids_file_path()
         pids_file.parent.mkdir(parents=True, exist_ok=True)
         with open(pids_file, "w") as f:
             json.dump({"pids": entries}, f)
     except Exception as e:
         logger.debug(f"Error saving suspended PIDs: {e}")
+
+
+def _resume_and_record(pid: int, record: Dict[str, Any]) -> bool:
+    """Resume a tracked process and log its pause, so the audio pipeline can remove the silence it left."""
+    if not _resume_process(pid):
+        return False
+    if record.get("suspended_at"):
+        pause_history.record_pause(record["suspended_at"], time.time())
+    return True
 
 
 @process_pausing_feature()
@@ -605,7 +619,7 @@ def force_resume_suspended_processes() -> Dict[str, int]:
             result["stale"] += 1
             continue
 
-        if _resume_process(pid):
+        if _resume_and_record(pid, record):
             logger.info(f"Resumed suspended process PID {pid}")
             result["resumed"] += 1
         else:
@@ -707,7 +721,16 @@ def _resolve_pause_target_hwnd(hwnd: Optional[int]) -> Optional[int]:
 # --- Linux process resolution ---
 
 
+def set_scene_linux_target(target: str) -> str:
+    """Set the scene's game executable as the pause target; empty falls back to the config."""
+    global _scene_linux_target
+    _scene_linux_target = os.path.basename((target or "").strip().replace("\\", "/"))
+    return _scene_linux_target
+
+
 def _get_configured_linux_target() -> str:
+    if _scene_linux_target:
+        return _scene_linux_target
     process_cfg = getattr(get_config(), "process_pausing", None)
     return (getattr(process_cfg, "linux_target_process", "") or "") if process_cfg else ""
 
@@ -1522,7 +1545,7 @@ def _auto_resume_monitor():
                     _suspended_pids.pop(pid, None)
                 _save_suspended_pids()
                 continue
-            if _resume_process(pid):
+            if _resume_and_record(pid, record):
                 with _suspended_pids_lock:
                     _suspended_pids.pop(pid, None)
                 _save_suspended_pids()
@@ -1559,7 +1582,7 @@ def _resume_tracked_process(pid: int, context: str) -> bool:
         _save_suspended_pids()
         return False
 
-    if _resume_process(pid):
+    if _resume_and_record(pid, record):
         with _suspended_pids_lock:
             _suspended_pids.pop(pid, None)
         _save_suspended_pids()
@@ -1694,6 +1717,23 @@ def request_overlay_process_pause(action: str, source: str = "overlay", hwnd: Op
     if normalized_action == "pause":
         return _handle_overlay_pause_request(normalized_source, hwnd)
     return _handle_overlay_resume_request(normalized_source, hwnd)
+
+
+def request_anki_confirmation_process_pause(paused: bool) -> bool:
+    """Hold the game's shared pause for the lifetime of the Anki confirmation dialog."""
+    if paused:
+        process_cfg = getattr(get_config(), "process_pausing", None)
+        if not getattr(process_cfg, "anki_confirmation_requests_pause", False):
+            return False
+        return request_overlay_process_pause("pause", source=_ANKI_CONFIRMATION_PAUSE_SOURCE)
+
+    # Always release an acquired hold, even if settings or the active profile changed.
+    # A hotkey or recovery action may already have cleared it; do not resume a
+    # subsequent, unrelated pause in that case.
+    with _suspended_pids_lock:
+        if _ANKI_CONFIRMATION_PAUSE_SOURCE not in _overlay_pause_request_sources:
+            return True
+        return _handle_overlay_resume_request(_ANKI_CONFIRMATION_PAUSE_SOURCE, None)
 
 
 _PAUSE_HOTKEY_CTX = "Pause hotkey"

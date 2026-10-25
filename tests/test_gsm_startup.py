@@ -9,7 +9,7 @@ import pytest
 
 import GameSentenceMiner.gsm as gsm_module
 from GameSentenceMiner.util import text_log
-from GameSentenceMiner.util.log_paths import get_process_log_path
+from GameSentenceMiner.util.log_paths import get_component_log_path
 
 
 def test_main_skips_run_when_existing_instance_detected(monkeypatch):
@@ -217,7 +217,7 @@ def test_launch_obs_early_skips_python_launch_under_electron(monkeypatch):
     assert calls == []
 
 
-def test_run_does_not_schedule_default_config_dialog_after_backend_ready(monkeypatch):
+def test_run_prepares_hidden_config_window_before_backend_ready(monkeypatch):
     calls = []
 
     class _FakeFuture:
@@ -309,11 +309,15 @@ def test_run_does_not_schedule_default_config_dialog_after_backend_ready(monkeyp
 
     app.run()
 
-    assert "config-window" not in calls
+    assert calls.count("config-window") == 1
+    assert calls.index("qt-app") < calls.index("config-window")
+    assert calls.index("config-window") < calls.index("send-initialized")
+    assert app.state.settings_window is fake_settings_window
+    assert gsm_module.gsm_state.config_app is fake_settings_window
     assert calls.index("send-initialized") < calls.index("qt-loop")
 
 
-def test_open_settings_creates_and_registers_config_window_lazily(monkeypatch):
+def test_open_settings_creates_and_registers_config_window_if_missing(monkeypatch):
     calls = []
 
     class FakeSettingsWindow:
@@ -822,7 +826,7 @@ def test_main_exits_when_single_instance_lock_is_unavailable(monkeypatch):
 def test_open_log_opens_the_current_process_log(monkeypatch, tmp_path):
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
-    expected_log = get_process_log_path(log_dir, "gamesentenceminer")
+    expected_log = get_component_log_path(log_dir, "backend")
     expected_log.write_text("test log", encoding="utf-8")
     opened_paths = []
 

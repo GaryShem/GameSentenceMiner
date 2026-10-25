@@ -13,6 +13,10 @@ class KechimochiSyncError(RuntimeError):
     pass
 
 
+class KechimochiConnectionError(KechimochiSyncError):
+    """Kechimochi's HTTP API is unreachable or timed out."""
+
+
 class KechimochiHTTPError(KechimochiSyncError):
     def __init__(self, message: str, status_code: int):
         super().__init__(message)
@@ -43,6 +47,21 @@ def normalize_kechimochi_url(value: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc.lower(), path, "", ""))
 
 
+def _response_error_detail(response: requests.Response) -> str:
+    """Expose API errors without dumping HTML error pages into the sync UI."""
+    try:
+        value = response.json()
+    except ValueError:
+        content_type = response.headers.get("Content-Type", "").partition(";")[0].strip().lower()
+        value = response.text if content_type == "text/plain" else ""
+    if isinstance(value, dict):
+        value = next((value[key] for key in ("error", "message", "detail") if isinstance(value.get(key), str)), "")
+    if not isinstance(value, str):
+        return ""
+    detail = " ".join(value.split())
+    return detail if len(detail) <= 500 else detail[:497] + "..."
+
+
 class KechimochiClient:
     def __init__(self, base_url: str = DEFAULT_KECHIMOCHI_URL, *, session=None):
         self.base_url = normalize_kechimochi_url(base_url)
@@ -65,18 +84,29 @@ class KechimochiClient:
             )
         except requests.RequestException as exc:
             # Never automatically repeat a POST: the server may already have committed it.
-            raise KechimochiSyncError(
+            error_type = (
+                KechimochiConnectionError
+                if isinstance(exc, (requests.ConnectionError, requests.Timeout))
+                else KechimochiSyncError
+            )
+            raise error_type(
                 "Could not reach Kechimochi. Open it and enable its HTTP API; the next sync will retry safely."
             ) from exc
         if not 200 <= response.status_code < 300:
-            hint = (
-                " Check the HTTP API scope and allowed address in Kechimochi."
-                if response.status_code == 403
-                else " Check that this URL points to the Kechimochi HTTP API."
+            hint = {
+                403: "Check the HTTP API scope and allowed address in Kechimochi.",
+                404: "Check that this URL points to the Kechimochi HTTP API.",
+            }.get(response.status_code, "")
+            message = " ".join(
+                part
+                for part in (
+                    f"Kechimochi {method} {path} failed (HTTP {response.status_code}).",
+                    _response_error_detail(response),
+                    hint,
+                )
+                if part
             )
-            raise KechimochiHTTPError(
-                f"Kechimochi {method} {path} failed (HTTP {response.status_code}).{hint}", response.status_code
-            )
+            raise KechimochiHTTPError(message, response.status_code)
         try:
             return response.json()
         except ValueError as exc:

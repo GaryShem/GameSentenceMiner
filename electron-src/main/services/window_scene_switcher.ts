@@ -62,6 +62,7 @@ export interface WindowSceneSwitcherRuntimeDependencies {
     ) => Promise<{ titlePattern: string; executableName?: string } | null>;
     requestForegroundSnapshot: () => void;
     restoreForegroundWindow: (hwnd: string) => void;
+    onSceneChanged?: () => void;
 }
 
 export interface WindowSceneSwitcherMigrationResult {
@@ -521,10 +522,10 @@ async function showConflictPicker(conflict: WindowSceneSwitcherConflict): Promis
     pendingConflict = conflict;
     closeConflictWindow();
     const picker = new BrowserWindow({
-        width: 560,
-        height: 420,
-        minWidth: 460,
-        minHeight: 320,
+        width: 800,
+        height: 500,
+        minWidth: 800,
+        minHeight: 500,
         show: false,
         resizable: true,
         minimizable: false,
@@ -997,6 +998,8 @@ export function expectWindowSceneSwitcherOBSSceneChange(sceneUuid: string): void
 }
 
 export function handleOBSSceneChanged(scene: ObsSceneRef): void {
+    // Launch profiles also work when automatic scene switching is disabled.
+    dependencies?.onSceneChanged?.();
     if (!obsConnected || startupSceneSyncPending) {
         return;
     }

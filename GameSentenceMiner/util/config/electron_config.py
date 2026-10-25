@@ -2,7 +2,6 @@ import copy
 import json
 import math
 import os
-import sys
 import time
 from threading import RLock
 from typing import Any, Dict, Optional, Tuple
@@ -20,13 +19,7 @@ ELECTRON_CONFIG_PATH = os.path.join(get_app_directory(), "electron", "config.jso
 
 
 def get_default_stability_ocr() -> str:
-    if is_windows():
-        return "meiki_text_detector"
-    if sys.platform == "darwin":
-        return "alivetext"
-    if sys.platform.startswith("linux"):
-        return "meiki_text_detector"
-    return "oneocr"
+    return "screenai"
 
 
 DEFAULT_STABILITY_OCR = get_default_stability_ocr()
@@ -74,8 +67,9 @@ DEFAULT_STORE_CONFIG: Dict[str, Any] = {
         "optimize_second_scan": True,
         "text_appears_instantly": False,
         "advanced_debug_logging": False,
+        "useOnlineOcr": False,
         "ocr1": DEFAULT_STABILITY_OCR,
-        "ocr2": "glens",
+        "ocr2": DEFAULT_STABILITY_OCR,
         "scanRate": 0.5,
         "language": "ja",
         "ocr_screenshots": False,
@@ -89,6 +83,8 @@ DEFAULT_STORE_CONFIG: Dict[str, Any] = {
         "menuOcrGamepad": "",
         "areaSelectOcrHotkey": "Ctrl+Shift+O",
         "areaSelectOcrGamepad": "",
+        "addAreaOcrHotkey": "Alt+Shift+N",
+        "addAreaOcrGamepad": "",
         "wholeWindowOcrHotkey": "Ctrl+Shift+W",
         "wholeWindowOcrGamepad": "",
         "globalPauseHotkey": "Ctrl+Shift+P",
@@ -123,7 +119,7 @@ DEFAULT_STORE_CONFIG: Dict[str, Any] = {
         "advancedMode": False,
         "scanRate_basic": 0.5,
         "ocr1_advanced": DEFAULT_STABILITY_OCR,
-        "ocr2_advanced": "glens",
+        "ocr2_advanced": DEFAULT_STABILITY_OCR,
         "scanRate_advanced": 0.5,
         # Legacy/compat keys still consumed by Python OCR runtime.
         "window_name": "",
@@ -132,13 +128,14 @@ DEFAULT_STORE_CONFIG: Dict[str, Any] = {
         "lastWindowSelected": "",
         "useObsAsOCRSource": True,
         "ocr1_basic": DEFAULT_STABILITY_OCR,
-        "ocr2_basic": "glens",
+        "ocr2_basic": DEFAULT_STABILITY_OCR,
     },
     "customPythonPackage": "GameSentenceMiner",
     "windowTransparencyToolHotkey": "Ctrl+Alt+Y",
     "windowTransparencyTarget": "",
     "runWindowTransparencyToolOnStartup": False,
     "runOverlayOnStartup": False,
+    "runOverlayWithActiveGame": False,
     "obsOcrScenes": [],
     "pullPreReleases": False,
     "runManualOCROnStartup": False,
@@ -394,15 +391,8 @@ def _get_basic_ocr1_engine(_ocr_config: Dict[str, Any]) -> str:
 
 
 def _get_basic_ocr2_engine(ocr_config: Dict[str, Any]) -> str:
-    ocr2 = ocr_config.get("ocr2")
-    if isinstance(ocr2, str) and ocr2.strip():
-        return ocr2
-
-    legacy_ocr2 = ocr_config.get("ocr2_basic")
-    if isinstance(legacy_ocr2, str) and legacy_ocr2.strip():
-        return legacy_ocr2
-
-    return "glens"
+    # Old basic profiles all stored Lens; only the new explicit opt-in enables it.
+    return "glens" if ocr_config.get("useOnlineOcr") is True else get_default_stability_ocr()
 
 
 def get_ocr_two_pass_ocr() -> bool:
@@ -436,7 +426,7 @@ def get_ocr_ocr2() -> str:
     ocr_config = _get_ocr_config()
     if not _is_advanced_mode():
         return _resolve_ocr_engine(_get_basic_ocr2_engine(ocr_config))
-    return _resolve_ocr_engine(ocr_config.get("ocr2", "glens"))
+    return _resolve_ocr_engine(ocr_config.get("ocr2", DEFAULT_STABILITY_OCR))
 
 
 def get_ocr_window_name() -> str:
@@ -496,6 +486,7 @@ def get_ocr_gamepad_hotkeys_enabled() -> bool:
             "manualOcrGamepad",
             "menuOcrGamepad",
             "areaSelectOcrGamepad",
+            "addAreaOcrGamepad",
             "wholeWindowOcrGamepad",
             "globalPauseGamepad",
         )
@@ -533,6 +524,16 @@ def get_ocr_area_select_ocr_gamepad() -> str:
     if not get_ocr_gamepad_hotkeys_enabled():
         return ""
     return _get_ocr_hotkey_value("areaSelectOcrGamepad", "")
+
+
+def get_ocr_add_area_ocr_hotkey() -> str:
+    return _get_ocr_hotkey_value("addAreaOcrHotkey", "Alt+Shift+N")
+
+
+def get_ocr_add_area_ocr_gamepad() -> str:
+    if not get_ocr_gamepad_hotkeys_enabled():
+        return ""
+    return _get_ocr_hotkey_value("addAreaOcrGamepad", "")
 
 
 def get_ocr_whole_window_ocr_hotkey() -> str:

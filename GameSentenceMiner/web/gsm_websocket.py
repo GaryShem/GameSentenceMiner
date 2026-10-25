@@ -558,6 +558,15 @@ class MultiplexWebsocketServerThread(_PortConflictSupport, threading.Thread):
 
     async def _send_initial_overlay_state(self, websocket):
         try:
+            from GameSentenceMiner.util.platform.window_state_monitor import get_window_state_monitor
+
+            payload = getattr(get_window_state_monitor(), "last_window_state_payload", None)
+            if payload:
+                await self._send_client_direct(websocket, json.dumps(payload))
+        except Exception as error:
+            logger.debug(f"[{self.server_name}] Failed to send initial window state: {error}")
+
+        try:
             from GameSentenceMiner.util.stats.live_stats import build_live_stats_payload, live_stats_tracker
 
             await self._send_client_direct(
@@ -1092,6 +1101,14 @@ def request_overlay_settings_open() -> bool:
         ID_OVERLAY,
         {"type": OVERLAY_COMMAND_OPEN_SETTINGS},
     )
+    return True
+
+
+def request_overlay_shutdown(launch_id: str) -> bool:
+    """Ask only the matching Electron-managed overlay to quit normally."""
+    if not isinstance(launch_id, str) or not launch_id or not websocket_manager.has_clients(ID_OVERLAY):
+        return False
+    websocket_manager.send_nowait(ID_OVERLAY, {"type": "shutdown-overlay", "launchId": launch_id})
     return True
 
 

@@ -11,6 +11,7 @@ import {
     isWindows10OrHigher,
 } from '../util.js';
 import { isQuitting } from '../main.js';
+import { splitWindowsCommandLine } from '../windows_command_line.js';
 import { spawn, type ChildProcess } from 'child_process';
 import OBSWebSocket from 'obs-websocket-js';
 import Store from 'electron-store';
@@ -22,6 +23,9 @@ import { sendStartOBS } from '../main.js';
 import axios from 'axios';
 import extract from 'extract-zip';
 import { installSessionManager } from '../services/install_session_state.js';
+import { syncProcessPausingTargetForScene } from '../services/process_pausing_target.js';
+import { closeWindowsOBSGracefully } from '../runtime/windows_obs_shutdown.js';
+import { createObsSettingsSnapshot } from '../services/obs_settings_snapshot.js';
 import type {
     InstallProgressKind,
     InstallStageStatus,
@@ -36,11 +40,13 @@ import {
 } from './obs_default_config.js';
 import {
     OBS_DSHOW_INPUT_KIND,
+    OBS_MONITOR_CAPTURE_INPUT_KIND,
     OBS_PIPEWIRE_DESKTOP_INPUT_KIND,
     OBS_PIPEWIRE_SCREEN_INPUT_KIND,
     OBS_PIPEWIRE_WINDOW_INPUT_KIND,
     OBS_WASAPI_INPUT_CAPTURE_KIND,
     buildCaptureCardOptions,
+    buildMonitorCaptureOptions,
     buildWaylandPipewireOption,
     buildLinuxSceneCaptureInputs,
     getObsWindowTitle,
@@ -367,11 +373,13 @@ const OLD_HELPER_SCENE = "GSM Helper";
 const HELPER_SCENE = 'GSM Helper - DONT TOUCH';
 const WINDOW_GETTER_INPUT = 'window_getter';
 const GAME_WINDOW_INPUT = 'game_window_getter';
+const MONITOR_GETTER_INPUT = 'monitor_getter';
 const CAPTURE_CARD_GETTER_INPUT = 'capture_card_getter';
 const AUDIO_INPUT_GETTER_INPUT = 'audio_input_getter';
 const HELPER_INPUT_NAMES = new Set([
     WINDOW_GETTER_INPUT,
     GAME_WINDOW_INPUT,
+    MONITOR_GETTER_INPUT,
     CAPTURE_CARD_GETTER_INPUT,
     AUDIO_INPUT_GETTER_INPUT,
 ]);
@@ -402,7 +410,7 @@ const OBS_DISCONNECT_TIMEOUT_MS = 3000;
 const VIDEO_CAPTURE_INPUT_KINDS = new Set([
     'window_capture',
     'game_capture',
-    'monitor_capture',
+    OBS_MONITOR_CAPTURE_INPUT_KIND,
     'xcomposite_input',
     OBS_PIPEWIRE_DESKTOP_INPUT_KIND,
     OBS_PIPEWIRE_WINDOW_INPUT_KIND,
@@ -821,6 +829,7 @@ export function getElectronOBSStartupConfig(): ElectronOBSStartupConfig {
 }
 
 function splitCommandLine(value: string): string[] {
+    if (isWindows()) return splitWindowsCommandLine(value);
     const matches = value.match(/"([^"]*)"|'([^']*)'|[^\s]+/g) ?? [];
     return matches.map((part) => {
         if (
@@ -1176,6 +1185,25 @@ function writeObsSeedConfigs(packedVersion: number | null): void {
     writeElectronOBSWebSocketConfig(getElectronOBSStartupConfig());
 }
 
+async function snapshotOBSSettings(reason: string): Promise<void> {
+    try {
+        await createObsSettingsSnapshot(
+            path.join(OBS_CONFIG_PATH, 'config', 'obs-studio'),
+            path.join(BASE_DIR, 'backup', 'obs'),
+            reason,
+            {
+                relatedFiles: [
+                    { sourcePath: path.join(BASE_DIR, 'config.json'), snapshotPath: 'gsm/config.json' },
+                    { sourcePath: path.join(BASE_DIR, 'electron', 'config.json'), snapshotPath: 'gsm/electron-config.json' },
+                ],
+            }
+        );
+    } catch (error) {
+        console.warn('Could not back up OBS scenes and recording profiles:',
+            error instanceof Error ? error.message : String(error));
+    }
+}
+
 /**
  * Trim a downloaded OBS install down to what GSM uses: drop all *.pdb debug
  * symbols and the obs-browser CEF runtime (~275MB). Mirrors prune_obs_directory
@@ -1259,6 +1287,7 @@ async function ensureObsInstalledInternal(): Promise<ObsEnsureStatus> {
         // Existing install: keep configs seeded and trim dead weight, but never
         // re-download.
         try {
+            await snapshotOBSSettings('before OBS startup');
             writeObsSeedConfigs(packObsVersion(null));
             pruneObsDirectory();
         } catch (error) {
@@ -1376,8 +1405,8 @@ function readOBSProcessPid(): number | null {
 
     try {
         const rawPid = fs.readFileSync(OBS_PID_FILE, 'utf-8').trim();
-        const pid = Number.parseInt(rawPid, 10);
-        return Number.isFinite(pid) && pid > 0 ? pid : null;
+        const pid = /^\d+$/.test(rawPid) ? Number(rawPid) : NaN;
+        return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
     } catch {
         return null;
     }
@@ -1462,7 +1491,7 @@ async function processImageIsObs(pid: number): Promise<boolean> {
                 '/FI',
                 `PID eq ${pid}`,
             ]);
-            return /obs/i.test(stdout ?? '');
+            return /^\s*"obs(?:32|64)?\.exe"\s*,/im.test(stdout ?? '');
         }
         const { stdout } = await execFileAsync('ps', ['-p', String(pid), '-o', 'comm=']);
         return /obs/i.test(stdout ?? '');
@@ -1551,7 +1580,10 @@ async function launchOBSFromElectronInternal(
             );
             return { status: 'already-running', pid: existingPid };
         }
-        await closeOBSFromElectron({ ignoreCloseConfig: true, reason: options.reason });
+        const closeResult = await closeOBSFromElectron({ ignoreCloseConfig: true, reason: options.reason });
+        if (closeResult.status === 'failed') {
+            return closeResult;
+        }
     }
 
     let launchCommand = resolveElectronOBSLaunchCommand(config.obsPath);
@@ -1564,6 +1596,9 @@ async function launchOBSFromElectronInternal(
     }
 
     try {
+        if (switcherMigrationPending) {
+            await snapshotOBSSettings('before OBS scene-switcher migration');
+        }
         await migrateLegacyWindowSceneSwitcherCollections(SCENE_CONFIG_PATH);
         cleanupOBSStartupArtifacts(getPortableOBSConfigDirectory(launchCommand));
         // For the bundled portable OBS (Windows), pick the websocket port for
@@ -1646,6 +1681,75 @@ export function launchOBSFromElectron(
     return electronOBSLaunchPromise;
 }
 
+async function stopOBSOutputsForShutdown(): Promise<void> {
+    // Use a separate, bounded connection: normal connection recovery registers
+    // scene helpers and retries, neither of which should run during shutdown.
+    refreshObsConfig();
+    const shutdownClient = new OBSWebSocket();
+    const request = (requestType: string, timeoutMs = OBS_CALL_TIMEOUT_MS) =>
+        withTimeout(`OBS shutdown ${requestType}`, timeoutMs, () =>
+            shutdownClient.call(requestType as any)
+        );
+    const outputActive = async (requestType: string): Promise<boolean> => {
+        let status: { outputActive?: unknown } | undefined;
+        try {
+            status = await request(requestType) as typeof status;
+        } catch (error) {
+            // OBS reports InvalidResourceState when replay buffering is disabled
+            // in the recording profile and therefore has no output to stop.
+            if (requestType === 'GetReplayBufferStatus' && (error as { code?: number })?.code === 604) {
+                return false;
+            }
+            throw error;
+        }
+        if (typeof status?.outputActive !== 'boolean') {
+            throw new Error(`OBS did not report a valid output state for ${requestType}; it was left running.`);
+        }
+        return status.outputActive;
+    };
+
+    try {
+        await withTimeout('OBS shutdown connection', 5000, () =>
+            shutdownClient.connect(`ws://${obsConfig.host}:${obsConfig.port}`, obsConfig.password)
+        );
+        if (await outputActive('GetStreamStatus')) {
+            throw new Error('OBS is streaming. Stop the stream manually before closing OBS.');
+        }
+        const [recording, replayBuffer] = await Promise.all([
+            outputActive('GetRecordStatus'), outputActive('GetReplayBufferStatus'),
+        ]);
+        const stopOutput = async (requestType: string, timeoutMs?: number) => {
+            try {
+                await request(requestType, timeoutMs);
+            } catch (error) {
+                // A concurrent manual stop can finish between status and stop.
+                // OutputNotRunning is safe; the status check below still verifies it.
+                if ((error as { code?: number })?.code !== 501) throw error;
+            }
+        };
+        if (recording) await stopOutput('StopRecord', 30_000);
+        if (replayBuffer) await stopOutput('StopReplayBuffer');
+
+        // StopReplayBuffer acknowledges the request before the encoder finishes.
+        // Closing the window immediately can still produce OBS's active-output dialog.
+        const deadline = Date.now() + 15_000;
+        while (true) {
+            const states = await Promise.all([
+                outputActive('GetRecordStatus'), outputActive('GetReplayBufferStatus'),
+            ]);
+            if (states.every((active) => !active)) return;
+            if (Date.now() >= deadline) {
+                throw new Error('OBS outputs did not finish stopping within 15 seconds; OBS was left running.');
+            }
+            await wait(250);
+        }
+    } finally {
+        await withTimeout('OBS shutdown disconnect', OBS_DISCONNECT_TIMEOUT_MS, () =>
+            shutdownClient.disconnect()
+        ).catch((error) => console.warn('Could not disconnect OBS shutdown client:', getObsErrorMessage(error)));
+    }
+}
+
 export async function closeOBSFromElectron(
     options: ElectronOBSProcessOptions = {}
 ): Promise<ElectronOBSProcessResult> {
@@ -1673,7 +1777,7 @@ export async function closeOBSFromElectron(
     }
 
     // For a PID we didn't spawn this session (read from obs_pid.txt), confirm it
-    // is actually OBS before killing it — Windows may have reused the PID for an
+    // is actually OBS before closing it — Windows may have reused the PID for an
     // unrelated process after our OBS exited.
     if (!ownedPid && !(await processImageIsObs(pid))) {
         clearOBSProcessPid();
@@ -1682,8 +1786,11 @@ export async function closeOBSFromElectron(
     }
 
     try {
+        await snapshotOBSSettings('before OBS shutdown');
+        await stopOBSOutputsForShutdown();
         if (isWindows()) {
-            await execFileAsync('taskkill', ['/PID', String(pid), '/T', '/F']);
+            await closeWindowsOBSGracefully(pid, execFileAsync);
+            await snapshotOBSSettings('after OBS shutdown');
         } else if (ownedProcess?.pid === pid) {
             ownedProcess.kill('SIGTERM');
         } else {
@@ -2106,11 +2213,13 @@ async function createSceneWithCapture(window: ObsSceneCaptureWindowSelection): P
     await getOBSConnection();
 
     const targetKind =
-        window.targetKind === 'capture_card' || typeof window.videoDeviceId === 'string'
-            ? 'capture_card'
-            : window.targetKind === 'wayland_pipewire'
-              ? 'wayland_pipewire'
-              : 'window';
+        window.targetKind === 'monitor'
+            ? 'monitor'
+            : window.targetKind === 'capture_card' || typeof window.videoDeviceId === 'string'
+              ? 'capture_card'
+              : window.targetKind === 'wayland_pipewire'
+                ? 'wayland_pipewire'
+                : 'window';
     const rawWindowTitle =
         typeof window.title === 'string' && window.title.trim()
             ? window.title.trim()
@@ -2136,6 +2245,15 @@ async function createSceneWithCapture(window: ObsSceneCaptureWindowSelection): P
                   switcherRegex: null,
               };
     const sceneName = sceneInfo.sceneName.trim() || generateFallbackWindowName();
+    // Validate the target before creating or replacing a scene.
+    const captureInputs = isWindows()
+        ? buildWindowsSceneCaptureInputs(sceneName, window, {
+              isWindows: isWindows(),
+              isWindows10OrHigher: isWindows10OrHigher(),
+          })
+        : buildLinuxSceneCaptureInputs(sceneName, window, {
+              isLinux: isLinux(),
+          });
 
     let sceneExisted = false;
     let sceneUuid = '';
@@ -2183,17 +2301,14 @@ async function createSceneWithCapture(window: ObsSceneCaptureWindowSelection): P
     expectWindowSceneSwitcherOBSSceneChange(sceneUuid);
     await callOBS('SetCurrentProgramScene', { sceneName });
 
-    const captureInputs = isWindows()
-        ? buildWindowsSceneCaptureInputs(sceneName, window, {
-              isWindows: isWindows(),
-              isWindows10OrHigher: isWindows10OrHigher(),
-          })
-        : buildLinuxSceneCaptureInputs(sceneName, window, {
-              isLinux: isLinux(),
-          });
-
     for (const captureInput of captureInputs) {
         await upsertSceneInput(sceneName, captureInput);
+    }
+
+    if (targetKind === 'monitor' && sceneUuid) {
+        await fitSceneItemsToPreview({ name: sceneName, id: sceneUuid });
+        // A reused scene may still have a rule from its previous window target.
+        removeWindowSceneSwitcherRule(sceneUuid);
     }
 
     if (targetKind === 'wayland_pipewire' && isLinux()) {
@@ -2308,6 +2423,7 @@ async function connectOBSWebSocket(
                 sceneSwitcherRegistered = true;
             }
             notifySceneSwitcherOBSConnected();
+            syncProcessPausingTargetForCurrentScene();
 
             return;
         } catch (error) {
@@ -2392,6 +2508,8 @@ export function openOBSWindow() {
     obsWindow = new BrowserWindow({
         width: 800,
         height: 600,
+        minWidth: 800,
+        minHeight: 500,
         webPreferences: {
             nodeIntegration: true,
             contextIsolation: false,
@@ -2413,10 +2531,23 @@ export function openOBSWindow() {
     registerOBSIPC();
 }
 
+function syncProcessPausingTarget(scene: ObsScene, force = false): void {
+    void syncProcessPausingTargetForScene(scene, { force }).catch((error) =>
+        console.warn(`Could not sync the process-pausing target for "${scene.name}":`, error)
+    );
+}
+
+/** Sync process pausing to the active scene; `force` after a backend restart, which forgets it. */
+export function syncProcessPausingTargetForCurrentScene(force = false): void {
+    void getCurrentScene().then((scene) => syncProcessPausingTarget(scene, force));
+}
+
 function setOBSSceneSwitcherCallback() {
     obs.on('CurrentProgramSceneChanged', (data) => {
         console.log(`Switched to OBS scene: ${data.sceneName}`);
-        handleOBSSceneChanged({ id: data.sceneUuid, name: data.sceneName });
+        const scene = { id: data.sceneUuid, name: data.sceneName };
+        handleOBSSceneChanged(scene);
+        syncProcessPausingTarget(scene);
     });
     obs.on('SceneNameChanged', (data) => {
         renameWindowSceneSwitcherRule(data.sceneUuid, data.sceneName);
@@ -2946,6 +3077,23 @@ export async function registerOBSIPC() {
         return option ? [option] : [];
     }
 
+    async function getMonitorList(): Promise<ObsWindowOption[]> {
+        if (!isWindows()) {
+            return [];
+        }
+        try {
+            const monitors = await getInputPropertyItems(
+                MONITOR_GETTER_INPUT,
+                OBS_MONITOR_CAPTURE_INPUT_KIND,
+                'monitor_id'
+            );
+            return buildMonitorCaptureOptions(monitors);
+        } catch (error) {
+            logObsError('Error getting monitor list:', error);
+            return [];
+        }
+    }
+
     async function getCaptureCardList(): Promise<ObsWindowOption[]> {
         if (!captureCardProbeEnabled) {
             return [];
@@ -2982,14 +3130,14 @@ export async function registerOBSIPC() {
 
     // Cache for getWindowList results to avoid hammering OBS with device
     // enumeration every poll cycle.
-    // "fast" = window/game capture only (cheap), "full" = also capture cards (expensive probes).
+    // "fast" = windows and monitors (cheap), "full" = also capture cards (expensive probes).
     const WINDOW_LIST_FAST_CACHE_TTL_MS = 3_000;
     const WINDOW_LIST_FULL_CACHE_TTL_MS = 30_000;
     let windowListFastCache: { data: ObsWindowOption[]; timestamp: number } | null = null;
     let windowListFullCache: { data: ObsWindowOption[]; timestamp: number } | null = null;
 
     /**
-     * Fetch only window_capture + game_capture lists (cheap OBS calls, no device probing).
+     * Fetch windows and monitors (cheap OBS calls, no capture-card probing).
      */
     async function getWindowListFast(): Promise<ObsWindowOption[]> {
         try {
@@ -3001,10 +3149,11 @@ export async function registerOBSIPC() {
 
             await forceDisableHelperSceneInputs();
 
-            const [windowCaptureWindows, gameCaptureWindows] =
+            const [windowCaptureWindows, gameCaptureWindows, monitors] =
                 await Promise.all([
                     getWindowsFromSource(WINDOW_GETTER_INPUT, 'window_capture'),
                     getWindowsFromSource(GAME_WINDOW_INPUT, 'game_capture'),
+                    getMonitorList(),
                 ]);
 
             const allWindows = [...windowCaptureWindows, ...gameCaptureWindows].filter(
@@ -3016,7 +3165,7 @@ export async function registerOBSIPC() {
                 (item) => item.targetKind === 'capture_card'
             ) ?? [];
 
-            return [...mergeObsWindowItems(allWindows), ...cachedCaptureCards].sort((left, right) =>
+            return [...mergeObsWindowItems(allWindows), ...monitors, ...cachedCaptureCards].sort((left, right) =>
                 left.title.localeCompare(right.title)
             );
         } catch (error) {
@@ -3040,17 +3189,18 @@ export async function registerOBSIPC() {
 
             await forceDisableHelperSceneInputs();
 
-            const [windowCaptureWindows, gameCaptureWindows, captureCards] =
+            const [windowCaptureWindows, gameCaptureWindows, monitors, captureCards] =
                 await Promise.all([
                     getWindowsFromSource(WINDOW_GETTER_INPUT, 'window_capture'),
                     getWindowsFromSource(GAME_WINDOW_INPUT, 'game_capture'),
+                    getMonitorList(),
                     getCaptureCardList(),
                 ]);
 
             const allWindows = [...windowCaptureWindows, ...gameCaptureWindows].filter(
                 (item) => !shouldFilterWindow(item)
             );
-            return [...mergeObsWindowItems(allWindows), ...captureCards].sort((left, right) =>
+            return [...mergeObsWindowItems(allWindows), ...monitors, ...captureCards].sort((left, right) =>
                 left.title.localeCompare(right.title)
             );
         } catch (error) {

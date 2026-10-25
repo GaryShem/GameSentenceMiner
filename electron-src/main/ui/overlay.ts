@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { getResourcesDir, isDev } from '../util.js';
+import { quit } from '../main.js';
 import { getBaseDir, getDefaultBaseDir } from '../data_dir.js';
 import { fileURLToPath } from 'url';
 
@@ -370,7 +371,7 @@ async function initializeYomitan() {
                     fs.copyFileSync(staticManifestPath, activeManifestPath);
                     fs.writeFileSync(markerPath, JSON.stringify({ status: 'migrated', date: Date.now() }));
                     app.relaunch();
-                    app.exit(0);
+                    void quit();
                     return;
                 }
             } else if (isMigrated) {
@@ -415,6 +416,8 @@ function openYomitanSettings() {
     yomitanSettingsWindow = new BrowserWindow({
         width: 1100,
         height: 600,
+        minWidth: 800,
+        minHeight: 500,
         webPreferences: {
             nodeIntegration: false,
         },
@@ -463,6 +466,8 @@ function openSettings() {
         settingsWindow = new BrowserWindow({
             width: 1200,
             height: 980,
+            minWidth: 800,
+            minHeight: 500,
             resizable: true,
             alwaysOnTop: true,
             title: 'Overlay Settings',
@@ -478,6 +483,8 @@ function openSettings() {
                 show: true,
                 width: 1200,
                 height: 980,
+                minWidth: 800,
+                minHeight: 500,
                 webPreferences: {
                     nodeIntegration: true,
                     contextIsolation: false,

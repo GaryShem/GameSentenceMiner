@@ -81,6 +81,36 @@ def test_get_settings_includes_extra_punctuation_regex(client, monkeypatch):
     assert data["extra_punctuation_regex"] == r"\.?【.*?】"
 
 
+def test_get_settings_omits_legacy_reading_time_toggle(client, monkeypatch):
+    monkeypatch.setattr(
+        "GameSentenceMiner.web.database_api.get_stats_config",
+        lambda: _stats_config(reading_time_adaptive_v2=False),
+    )
+
+    response = client.get("/api/settings")
+
+    assert response.status_code == 200
+    assert "reading_time_adaptive_v2" not in response.get_json()
+
+
+def test_post_settings_cannot_disable_adaptive_reading_time(client, monkeypatch):
+    config = _stats_config()
+    saved = []
+    monkeypatch.setattr("GameSentenceMiner.web.database_api.get_stats_config", lambda: config)
+    monkeypatch.setattr("GameSentenceMiner.web.database_api.save_stats_config", lambda updated: saved.append(updated))
+
+    response = client.post(
+        "/api/settings",
+        json={"session_gap_seconds": 900, "reading_time_adaptive_v2": False},
+    )
+
+    assert response.status_code == 200
+    assert "reading_time_adaptive_v2" not in response.get_json()
+    assert not hasattr(config, "reading_time_adaptive_v2")
+    assert config.session_gap_seconds == 900
+    assert saved == [config]
+
+
 def test_get_settings_includes_day_rollover_hour(client, monkeypatch):
     monkeypatch.setattr(
         "GameSentenceMiner.web.database_api.get_stats_config",
@@ -282,6 +312,30 @@ def test_tadoku_settings_reject_invalid_game_whitelist(client, monkeypatch, valu
     assert response.get_json()["error"] == "Tadoku automatic sync game whitelist must contain valid game IDs"
 
 
+def test_tadoku_settings_keep_saved_password_and_cookie_when_password_is_blank(client, monkeypatch):
+    config = _stats_config(
+        tadoku_username="reader@example.com",
+        tadoku_password="saved-password",
+        tadoku_session_cookie="saved-cookie",
+    )
+    monkeypatch.setattr("GameSentenceMiner.web.database_api.get_stats_config", lambda: config)
+    monkeypatch.setattr("GameSentenceMiner.web.database_api.save_stats_config", lambda _config: None)
+
+    response = client.post(
+        "/api/settings",
+        json={"tadoku_username": "reader@example.com", "tadoku_password": "", "tadoku_title_source": "original"},
+    )
+
+    assert response.status_code == 200
+    assert config.tadoku_username == "reader@example.com"
+    assert config.tadoku_password == "saved-password"
+    assert config.tadoku_session_cookie == "saved-cookie"
+    assert config.tadoku_title_source == "original"
+    assert response.get_json()["tadoku_configured"] is True
+    assert "tadoku_password" not in response.get_json()
+    assert "tadoku_session_cookie" not in response.get_json()
+
+
 def test_tadoku_settings_can_clear_saved_credentials(client, monkeypatch):
     config = _stats_config(
         tadoku_username="reader",
@@ -298,3 +352,34 @@ def test_tadoku_settings_can_clear_saved_credentials(client, monkeypatch):
     assert config.tadoku_username == ""
     assert config.tadoku_password == ""
     assert config.tadoku_session_cookie == ""
+
+
+@pytest.mark.parametrize("title_source", ["english", "original", "romaji"])
+def test_tadoku_title_source_settings_round_trip(client, monkeypatch, title_source):
+    config = _stats_config()
+    saved = []
+    monkeypatch.setattr("GameSentenceMiner.web.database_api.get_stats_config", lambda: config)
+    monkeypatch.setattr("GameSentenceMiner.web.database_api.save_stats_config", lambda updated: saved.append(updated))
+
+    assert client.get("/api/settings").get_json()["tadoku_title_source"] == "english"
+    response = client.post("/api/settings", json={"tadoku_title_source": title_source})
+
+    assert response.status_code == 200
+    assert response.get_json()["tadoku_title_source"] == title_source
+    assert client.get("/api/settings").get_json()["tadoku_title_source"] == title_source
+    assert config.tadoku_title_source == title_source
+    assert saved == [config]
+
+
+@pytest.mark.parametrize("title_source", ["", "invalid", [], {}, 123, True])
+def test_tadoku_settings_reject_invalid_title_source(client, monkeypatch, title_source):
+    config = _stats_config(tadoku_title_source="original")
+    saved = []
+    monkeypatch.setattr("GameSentenceMiner.web.database_api.get_stats_config", lambda: config)
+    monkeypatch.setattr("GameSentenceMiner.web.database_api.save_stats_config", lambda updated: saved.append(updated))
+
+    response = client.post("/api/settings", json={"tadoku_title_source": title_source})
+
+    assert response.status_code == 400
+    assert config.tadoku_title_source == "original"
+    assert saved == []

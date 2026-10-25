@@ -10,6 +10,7 @@ import {
     type SaveDialogOptions,
 } from 'electron';
 import { spawn } from 'child_process';
+import { terminateProcessTree } from '../runtime/process_tree.js';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -37,11 +38,11 @@ import {
     getPythonPath,
     getQuitOnWindowClose,
     getRunOverlayOnStartup,
+    getRunOverlayWithActiveGame,
     getRunWindowTransparencyToolOnStartup,
     getSceneLaunchProfileForScene,
     getSceneLaunchProfiles,
     getSetupWizardVersion,
-    getShowYuzuTab,
     getStartConsoleMinimized,
     getStatsEndpoint,
     getTextCaptureWizardEnabled,
@@ -76,10 +77,10 @@ import {
     setLaunchAgentMinimized,
     setLaunchTextractorMinimized,
     setRunOverlayOnStartup,
+    setRunOverlayWithActiveGame,
     setRunWindowTransparencyToolOnStartup,
     setSceneLaunchProfiles,
     setSetupWizardVersion,
-    setShowYuzuTab,
     setStartConsoleMinimized,
     setStatsEndpoint,
     setTextCaptureWizardEnabled,
@@ -100,7 +101,9 @@ import { getConfiguredSinglePort, getGsmProfileNames } from '../gsm_config.js';
 import {
     closeAllPythonProcesses,
     isPythonLaunchBlockedByUpdate,
+    isQuitting,
     mainWindow,
+    quit,
     pyProc,
     restartGSM,
     sendOpenOverlaySettings,
@@ -965,11 +968,11 @@ function getSettingsSnapshot() {
         pullPreReleases: getPullPreReleases(),
         startConsoleMinimized: getStartConsoleMinimized(),
         customPythonPackage: getCustomPythonPackage(),
-        showYuzuTab: getShowYuzuTab(),
         windowTransparencyToolHotkey: getWindowTransparencyToolHotkey(),
         windowTransparencyTarget: store.get('windowTransparencyTarget') || '',
         runWindowTransparencyToolOnStartup: getRunWindowTransparencyToolOnStartup(),
         runOverlayOnStartup: getRunOverlayOnStartup(),
+        runOverlayWithActiveGame: getRunOverlayWithActiveGame(),
         quitOnWindowClose: getQuitOnWindowClose(),
         textCaptureWizardEnabled: getTextCaptureWizardEnabled(),
         visibleTabs: getVisibleTabs(),
@@ -1027,6 +1030,9 @@ interface SettingsIPCDependencies {
     getUpdateStatus: () => Promise<unknown>;
     checkForUpdates: () => Promise<unknown>;
     updateNow: () => Promise<unknown>;
+    getAppUpdateStatus?: () => unknown;
+    getAppUpdateChangelog?: () => Promise<unknown>;
+    installAppUpdate?: (version: string) => Promise<unknown>;
     showUpdateChangelogPreview?: (payload: {
         fromVersion: string;
         toVersion: string;
@@ -1044,11 +1050,22 @@ export function registerSettingsIPC(deps?: SettingsIPCDependencies) {
         return getSettingsSnapshot();
     });
 
+    ipcMain.handle('settings.getTheme', () => getTheme());
+
     ipcMain.handle('settings.getUpdateStatus', async () => {
         if (!deps) {
             return null;
         }
         return await deps.getUpdateStatus();
+    });
+
+    ipcMain.handle('settings.getAppUpdateStatus', () => deps?.getAppUpdateStatus?.() ?? null);
+    ipcMain.handle('settings.getAppUpdateChangelog', () => deps?.getAppUpdateChangelog?.() ?? null);
+    ipcMain.handle('settings.installAppUpdate', async (_event, version: unknown) => {
+        if (typeof version !== 'string' || !version.trim()) {
+            throw new Error('An update version is required.');
+        }
+        return await deps?.installAppUpdate?.(version.trim()) ?? null;
     });
 
     ipcMain.handle('settings.checkForUpdates', async () => {
@@ -1164,9 +1181,6 @@ export function registerSettingsIPC(deps?: SettingsIPCDependencies) {
         if (typeof payload.customPythonPackage === 'string') {
             setCustomPythonPackage(payload.customPythonPackage);
         }
-        if (typeof payload.showYuzuTab === 'boolean') {
-            setShowYuzuTab(payload.showYuzuTab);
-        }
         if (typeof payload.windowTransparencyToolHotkey === 'string') {
             setWindowTransparencyToolHotkey(payload.windowTransparencyToolHotkey);
         }
@@ -1178,6 +1192,9 @@ export function registerSettingsIPC(deps?: SettingsIPCDependencies) {
         }
         if (typeof payload.runOverlayOnStartup === 'boolean') {
             setRunOverlayOnStartup(payload.runOverlayOnStartup);
+        }
+        if (typeof payload.runOverlayWithActiveGame === 'boolean') {
+            setRunOverlayWithActiveGame(payload.runOverlayWithActiveGame);
         }
         if (typeof payload.quitOnWindowClose === 'boolean') {
             setQuitOnWindowClose(payload.quitOnWindowClose);
@@ -1462,7 +1479,7 @@ export function registerSettingsIPC(deps?: SettingsIPCDependencies) {
 
             if (restart.response === 0) {
                 app.relaunch();
-                app.exit(0);
+                await quit();
             }
 
             return { success: true, restartRequired: true, ...restored };
@@ -1916,17 +1933,19 @@ export function registerSettingsIPC(deps?: SettingsIPCDependencies) {
 }
 
 export function runWindowTransparencyTool() {
-    if (isPythonLaunchBlockedByUpdate()) {
+    if (isQuitting || isPythonLaunchBlockedByUpdate()) {
         console.warn(
-            '[Update Guard] Skipping window transparency tool start while updates are in progress.'
+            '[Shutdown Guard] Skipping window transparency tool start while shutdown or updates are in progress.'
         );
         return;
     }
 
     const hotkey = getWindowTransparencyToolHotkey();
-    if (window_transparency_process && !window_transparency_process.killed) {
+    if (window_transparency_process && window_transparency_process.exitCode === null) {
         console.log('Stopping existing Window Transparency Tool process');
-        window_transparency_process.kill();
+        void stopWindowTransparencyTool().catch((error) => {
+            console.warn('Failed to replace Window Transparency Tool process:', error);
+        });
     }
     console.log(
         `Starting Window Transparency Tool with hotkey: ${hotkey} and target: ${getWindowTransparencyTarget()}`
@@ -1939,6 +1958,7 @@ export function runWindowTransparencyTool() {
         '--window',
         getWindowTransparencyTarget(),
     ], {
+        detached: process.platform !== 'win32',
         env: getSanitizedPythonEnv()
     });
     window_transparency_process.stdout.on('data', (data: any) => {
@@ -1949,9 +1969,11 @@ export function runWindowTransparencyTool() {
     });
 }
 
-export function stopWindowTransparencyTool() {
-    if (window_transparency_process) {
-        window_transparency_process.kill();
-        window_transparency_process = null;
+export async function stopWindowTransparencyTool(): Promise<void> {
+    const proc = window_transparency_process;
+    if (!proc) {
+        return;
     }
+    window_transparency_process = null;
+    await terminateProcessTree(proc);
 }

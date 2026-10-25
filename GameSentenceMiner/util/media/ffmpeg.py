@@ -6,13 +6,20 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
+from copy import deepcopy
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Tuple, Optional, Any
 
 if TYPE_CHECKING:
     from GameSentenceMiner.ui.qt_main import DialogManager
 
+import numpy as np
+import soundfile as sf
+
 from GameSentenceMiner import obs
+from GameSentenceMiner.util.command_line import split_command_line
 from GameSentenceMiner.util.config.configuration import (
     ANIMATED_SCREENSHOT_CODEC_DEFAULT,
     ANIMATED_SCREENSHOT_CODECS,
@@ -33,6 +40,21 @@ from GameSentenceMiner.util.gsm_utils import (
 )
 from GameSentenceMiner.util.config import configuration
 from GameSentenceMiner.util.text_log import initial_time, TextSource
+from GameSentenceMiner.util.media.avif_sizing import (
+    AvifParameters,
+    choose_size_parameters,
+    sample_ranges,
+    size_candidates,
+)
+from GameSentenceMiner.util.media import pause_gaps
+from GameSentenceMiner.util.media.pause_gaps import AudioTimeline
+from GameSentenceMiner.util.media import pause_history
+
+
+@lru_cache(maxsize=256)
+def _cached_probe_json(file_path, entries, stream_select, executable, signature):
+    # Exceptions are deliberately not cached: a failed/unfinished file can recover.
+    return FFmpegHelper._run_probe_json(file_path, entries, stream_select, executable)
 
 
 supported_formats = {
@@ -333,6 +355,101 @@ def _run_av1_command_with_fallback(
         return FFmpegHelper.run(fallback_command, check=True)
 
 
+def _timestamp_seconds(value: str | float | None) -> float:
+    seconds = 0.0
+    for part in str(value or 0).split(":"):
+        seconds = seconds * 60 + float(part)
+    if not math.isfinite(seconds):
+        raise ValueError("Animation start must be finite")
+    return max(0.0, seconds)
+
+
+def _run_size_target_avif(
+    input_path: Path,
+    output_path: Path,
+    start: float,
+    duration: float,
+    caps: AvifParameters,
+    target_bytes: int,
+    priority: str,
+    av1_encoder: str,
+    fallback_enabled: bool,
+    output_args: list[str],
+    build_command: Callable[[int, int, float, float], list[str]],
+) -> None:
+    if output_path.exists():
+        raise FileExistsError(f"Animation output already exists: {output_path}")
+    info = FFmpegHelper.get_probe_json(str(input_path), "stream=width,avg_frame_rate:format=duration", "v:0") or {}
+    stream = next(iter(info.get("streams", [])), {})
+    source_width = _coerce_int(stream.get("width"), 0)
+    source_fps = _fraction_to_float(stream.get("avg_frame_rate"))
+    width = caps.width or source_width
+    if source_width > 0:
+        width = min(width, source_width)
+    if width <= 0:
+        raise ValueError("Cannot estimate AVIF size without a source width or configured maximum width")
+    fps = min(caps.fps, max(1, math.floor(source_fps))) if source_fps > 0 else caps.fps
+    caps = AvifParameters(max(1, fps), max(2, width // 2 * 2), max(0, min(63, caps.crf)))
+    source_duration = _coerce_float((info.get("format") or {}).get("duration"), 0.0)
+    if source_duration > 0:
+        duration = min(duration, source_duration - start)
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError("Animation window must overlap the source video")
+
+    candidates = size_candidates(caps, priority)
+    encoders = [_normalize_av1_encoder(av1_encoder)]
+    if fallback_enabled:
+        encoders.append(_fallback_av1_encoder(av1_encoder))
+
+    def encode_with_encoder(encoder):
+        # Each search has its own scratch directory, including concurrent card prefetches.
+        with tempfile.TemporaryDirectory(prefix="gsm-avif-size-", dir=get_temporary_directory()) as directory:
+            sample_path = Path(directory) / "sample.avif"
+
+            def encode(parameters: AvifParameters, clip_start: float, clip_duration: float, path: Path):
+                command = build_command(parameters.fps, parameters.width, clip_start, clip_duration)
+                command += ["-abort_on", "empty_output"]
+                if path == sample_path:
+                    command += ["-y"]  # Reuse only our temporary sample, with stdin disabled.
+                command += _av1_encoder_args(encoder, parameters.crf) + output_args + [str(path)]
+                FFmpegHelper.run(command, check=True)
+
+            def estimate(parameters: AvifParameters) -> int:
+                total_bytes = 0
+                sampled_duration = 0.0
+                for sample_start, sample_duration in sample_ranges(start, duration):
+                    encode(parameters, sample_start, sample_duration, sample_path)
+                    sample_bytes = sample_path.stat().st_size
+                    if not sample_bytes:
+                        raise RuntimeError("AVIF size sample was empty")
+                    total_bytes += sample_bytes
+                    sampled_duration += sample_duration
+                # Container/keyframe overhead makes this conservative; motion and scene
+                # changes mean the target remains an estimate, not a strict maximum.
+                return math.ceil(total_bytes * duration / sampled_duration)
+
+            parameters, estimated_bytes = choose_size_parameters(candidates, target_bytes, estimate)
+            logger.info(
+                f"AVIF target {target_bytes / 1024:.0f} KB: estimated {estimated_bytes / 1024:.0f} KB, "
+                f"{parameters.fps} FPS, width {parameters.width}, CRF {parameters.crf} ({priority}, {encoder})"
+            )
+            if estimated_bytes > target_bytes:
+                logger.warning("AVIF size target is below the estimate at minimum settings; using minimum settings.")
+            encode(parameters, start, duration, output_path)
+
+    for index, encoder in enumerate(encoders):
+        try:
+            encode_with_encoder(encoder)
+            return
+        except Exception as error:
+            if index == len(encoders) - 1:
+                raise
+            logger.warning(
+                f"AVIF size encoding with {encoder} failed; re-estimating with {encoders[index + 1]}: {error}"
+            )
+            output_path.unlink(missing_ok=True)
+
+
 class FFmpegHelper:
     """Helper class to encapsulate reusable FFmpeg operations."""
 
@@ -385,9 +502,26 @@ class FFmpegHelper:
 
     @staticmethod
     def get_probe_json(file_path: str, entries: str, stream_select: str) -> Optional[dict]:
-        """Runs ffprobe and returns parsed JSON."""
+        """Reuse successful probes while the file and requested stream data are unchanged."""
+        try:
+            path = os.path.abspath(file_path)
+            try:
+                stat = os.stat(path)
+            except OSError:
+                # Preserve probing/error handling for missing or inaccessible paths.
+                return FFmpegHelper._run_probe_json(file_path, entries, stream_select, get_ffprobe_path())
+            signature = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            # Keep probes from different ffprobe executables separate.
+            info = _cached_probe_json(path, entries, stream_select, get_ffprobe_path(), signature)
+            return deepcopy(info)
+        except Exception as e:
+            logger.error(f"Error probing file {file_path}: {e}")
+            return None
+
+    @staticmethod
+    def _run_probe_json(file_path: str, entries: str, stream_select: str, executable: str) -> dict:
         cmd = [
-            get_ffprobe_path(),
+            executable,
             "-v",
             "error",
         ]
@@ -395,12 +529,8 @@ class FFmpegHelper:
             cmd.extend(["-select_streams", stream_select])
         cmd.extend(["-show_entries", entries, "-of", "json", str(file_path)])
         logger.debug(" ".join(cmd))
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            return json.loads(result.stdout)
-        except Exception as e:
-            logger.error(f"Error probing file {file_path}: {e}")
-            return None
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return json.loads(result.stdout)
 
     @staticmethod
     def parse_custom_settings(custom_settings: str) -> Tuple[List[str], List[str]]:
@@ -414,23 +544,11 @@ class FFmpegHelper:
         if not custom_settings:
             return pre_input, post_input
 
-        # Check for hwaccel
-        if "-hwaccel" in custom_settings:
-            parts = custom_settings.split()
-            try:
-                idx = parts.index("-hwaccel")
-                # Take -hwaccel and the next argument
-                pre_input = parts[idx : idx + 2]
-                pre_input_str = " ".join(pre_input)
-                # Remove pre_input part from original string to get post_input
-                post_input = custom_settings.replace(pre_input_str, "").split()
-                return pre_input, post_input
-            except (ValueError, IndexError):
-                pass
-
-        # If no hwaccel logic applied, everything is post-input
-        post_input = custom_settings.split()
-        return pre_input, post_input
+        parts = split_command_line(custom_settings)
+        for idx, part in enumerate(parts[:-1]):
+            if part.lower() in ("-hwaccel", "--hwaccel") and not parts[idx + 1].startswith("-"):
+                return parts[idx : idx + 2], parts[:idx] + parts[idx + 2 :]
+        return [], parts
 
     @staticmethod
     def extract_hwaccel_args(custom_settings: str) -> List[str]:
@@ -438,7 +556,7 @@ class FFmpegHelper:
         if not custom_settings:
             return []
 
-        parts = custom_settings.split()
+        parts = split_command_line(custom_settings)
         for idx, part in enumerate(parts):
             normalized = part.lower()
             if normalized in ("-hwaccel", "--hwaccel"):
@@ -515,6 +633,8 @@ def video_to_anim(
     adaptive_avif: bool | None = None,
     avif_faststart: bool | None = None,
     av1_encoder_fallback: bool | None = None,
+    target_size_kb: int | None = None,
+    size_priority: str | None = None,
 ) -> Path:
     """Convert video to efficient animated WebP/AVIF or WebM with audio using ffmpeg."""
 
@@ -548,56 +668,75 @@ def video_to_anim(
         avif_faststart = bool(getattr(animated_settings, "faststart", True))
     if av1_encoder_fallback is None:
         av1_encoder_fallback = bool(getattr(animated_settings, "encoder_fallback", True))
+    if target_size_kb is None:
+        target_size_kb = getattr(animated_settings, "target_size_kb", 0)
+    if size_priority is None:
+        size_priority = getattr(animated_settings, "size_priority", "balanced")
+    use_size_target = codec == "avif" and not audio and target_size_kb > 0
 
     if duration is None or duration == 0:
         duration = 15.0
-    if codec == "avif" and not audio and adaptive_avif:
+    if codec == "avif" and not audio and adaptive_avif and not use_size_target:
         fps, max_width, quality = _adaptive_avif_encode_settings(duration, fps, max_width, quality)
 
-    # Build filter chain
-    vf_parts = []
-
-    if get_config().screenshot.trim_black_bars_wip:
-        timestamp_for_detection = float(start) if start else 0
+    crop_filters = []
+    if get_config().screenshot.trim_black_bars_wip and not crop:
+        timestamp_for_detection = _timestamp_seconds(start)
         crop_filter = find_black_bars(str(input_path), timestamp_for_detection)
         if crop_filter:
-            vf_parts.append(crop_filter)
+            crop_filters.append(crop_filter)
 
-    if fps:
-        vf_parts.append(f"fps={fps}")
-    if crop:
-        vf_parts.append(f"crop={crop}")
-
-    # Scale logic
-    if max_width and max_height:
-        vf_parts.append(f"scale='min({max_width},iw)':min({max_height},ih):force_original_aspect_ratio=decrease")
-    elif max_width:
-        vf_parts.append(f"scale={max_width}:-1")
-    elif max_height:
-        vf_parts.append(f"scale=-1:{max_height}")
-
-    vf_parts.append("pad=ceil(iw/2)*2:ceil(ih/2)*2")  # ensure even dimensions
-    if extra_vf:
-        vf_parts.extend(extra_vf)
-
-    # Build command
-    cmd = ffmpeg_base_command_list.copy()
-    if start:
-        cmd += ["-ss", str(start)]
-
+    hwaccel_args = []
     if codec == "avif":
         hwaccel_args = FFmpegHelper.extract_hwaccel_args(get_config().screenshot.custom_ffmpeg_settings)
-        if hwaccel_args:
-            cmd += hwaccel_args
 
-    cmd += ["-i", str(input_path)]
+    def build_command(encode_fps, encode_width, clip_start, clip_duration):
+        vf_parts = crop_filters.copy()
+        if encode_fps:
+            # A seek between source frames must still produce a frame in very
+            # short, low-FPS samples instead of an empty AVIF container.
+            rounding = ":round=up:start_time=0" if use_size_target else ""
+            vf_parts.append(f"fps={encode_fps}{rounding}")
+        if crop:
+            vf_parts.append(f"crop={crop}")
+        if encode_width and max_height:
+            vf_parts.append(f"scale='min({encode_width},iw)':min({max_height},ih):force_original_aspect_ratio=decrease")
+        elif encode_width:
+            if use_size_target:
+                vf_parts.append(f"scale='2*trunc(min({encode_width},iw)/2)':-2")
+            else:
+                vf_parts.append(f"scale={encode_width}:-1")
+        elif max_height:
+            vf_parts.append(f"scale=-1:{max_height}")
+        vf_parts.append("pad=ceil(iw/2)*2:ceil(ih/2)*2")
+        if extra_vf:
+            vf_parts.extend(extra_vf)
 
-    cmd += ["-t", str(duration)]
+        command = ffmpeg_base_command_list.copy()
+        if clip_start is not None:
+            command += ["-ss", str(clip_start)]
+        command += hwaccel_args + ["-i", str(input_path), "-t", str(clip_duration), "-vf", ",".join(vf_parts)]
+        if not audio:
+            command += ["-an"]
+        return command
 
-    cmd += ["-vf", ",".join(vf_parts)]
+    if use_size_target:
+        _run_size_target_avif(
+            input_path,
+            output_path,
+            _timestamp_seconds(start),
+            duration,
+            AvifParameters(_coerce_int(fps, 15), _coerce_int(max_width, 0), _coerce_int(quality, 28)),
+            target_size_kb * 1024,
+            size_priority,
+            av1_encoder,
+            av1_encoder_fallback,
+            ["-movflags", "+faststart"] if avif_faststart else [],
+            build_command,
+        )
+        return str(output_path)
 
-    if not audio:
-        cmd += ["-an"]
+    cmd = build_command(fps, max_width, start, duration)
 
     # Codec settings
     if audio:
@@ -638,16 +777,19 @@ def video_to_anim(
     return str(output_path)
 
 
-def video_to_animation_with_start_end(video_path: str | Path, start: float, end: float, **kwargs) -> Path:
+def video_to_animation_with_start_end(
+    video_path: str | Path, start: float, end: float, output_path: str | Path | None = None, **kwargs
+) -> Path:
     """Convert video to animation using start and end time strings."""
-    if end < start:
+    if end <= start:
         raise ValueError("end time must be after start time")
     duration = end - start
 
-    output_path = get_unique_temp_file_for_game(
-        obs.get_current_game(sanitize=True),
-        get_config().screenshot.animated_settings.extension,
-    )
+    if output_path is None:
+        output_path = get_unique_temp_file_for_game(
+            obs.get_current_game(sanitize=True),
+            get_config().screenshot.animated_settings.extension,
+        )
 
     return video_to_anim(
         input_path=video_path,
@@ -776,13 +918,12 @@ def get_anki_compatible_video(video_file, screenshot_timing, vad_start, vad_end,
 
 def get_raw_screenshot(video_file, screenshot_timing, try_selector=False):
     """Extract a frame as a raw PNG without filters."""
-    screenshot_timing = screenshot_timing if screenshot_timing else 1
     if try_selector:
-        filepath = call_frame_extractor(video_path=video_file, timestamp=screenshot_timing)
-        if filepath:
-            return filepath
-        else:
-            logger.error("Frame extractor script failed to run or returned no output, defaulting")
+        # Cancellation is intentional; do not turn it into a default screenshot.
+        return call_frame_extractor(
+            video_path=video_file, timestamp=screenshot_timing if screenshot_timing is not None else 1
+        )
+    screenshot_timing = screenshot_timing if screenshot_timing else 1
 
     output_image = make_unique_file_name(
         os.path.join(get_temporary_directory(), f"{obs.get_current_game(sanitize=True)}_raw.png")
@@ -794,6 +935,9 @@ def get_raw_screenshot(video_file, screenshot_timing, try_selector=False):
         "-i",
         f"{video_file}",
         "-vframes",
+        "1",
+        # These PNGs are temporary previews; favor encoding speed without losing pixels.
+        "-compression_level",
         "1",
         output_image,
     ]
@@ -808,7 +952,9 @@ def get_raw_screenshot(video_file, screenshot_timing, try_selector=False):
     return output_image
 
 
-def encode_screenshot(input_image, source_video_path=None, screenshot_timing=None, output_path=None):
+def encode_screenshot(
+    input_image, source_video_path=None, screenshot_timing=None, output_path=None, already_processed=False
+):
     """Encode a screenshot with user's configured settings."""
     if output_path is None:
         output_image = make_unique_file_name(
@@ -825,7 +971,11 @@ def encode_screenshot(input_image, source_video_path=None, screenshot_timing=Non
 
     ffmpeg_command_base = ffmpeg_base_command_list + pre_input_args + ["-i", input_image]
 
-    video_filters = _build_screenshot_video_filters(source_video_path, screenshot_timing, use_negative_two=True)
+    video_filters = (
+        []
+        if already_processed
+        else _build_screenshot_video_filters(source_video_path, screenshot_timing, use_negative_two=True)
+    )
     _extend_video_filters(ffmpeg_command_base, video_filters)
 
     if get_config().screenshot.custom_ffmpeg_settings:
@@ -862,14 +1012,13 @@ def encode_screenshot(input_image, source_video_path=None, screenshot_timing=Non
 
 
 def get_screenshot(video_file, screenshot_timing, try_selector=False):
-    screenshot_timing = screenshot_timing if screenshot_timing else 1
     if try_selector:
-        filepath = call_frame_extractor(video_path=video_file, timestamp=screenshot_timing)
-        output = process_image(filepath, source_video_path=video_file, screenshot_timing=screenshot_timing)
-        if output:
-            return output
-        else:
-            logger.error("Frame extractor script failed to run or returned no output, defaulting")
+        # The selector exports each selected item with its own exact timestamp.
+        # Returning the collection here keeps the complete result intact.
+        return call_frame_extractor(
+            video_path=video_file, timestamp=screenshot_timing if screenshot_timing is not None else 1
+        )
+    screenshot_timing = screenshot_timing if screenshot_timing else 1
 
     output_image = make_unique_file_name(
         os.path.join(
@@ -1107,8 +1256,8 @@ def find_black_bars(video_file, screenshot_timing):
                 # source can lose one pixel even when only pillarboxing is removed.
                 is_pillarbox_only_crop = crop_height >= orig_height - 2
 
-                if area_ratio > 0.95:
-                    logger.info("Detected crop would only remove minimal area. Skipping.")
+                if crop_width == orig_width and crop_height == orig_height:
+                    logger.info("cropdetect suggests no cropping is needed.")
                     return None
 
                 if area_ratio < 0.25 and not is_pillarbox_only_crop:
@@ -1290,29 +1439,86 @@ def get_audio_codec(video_path):
 
 
 def get_audio_and_trim(video_path, game_line, next_line_time, anki_card_creation_time):
-    codec = get_audio_codec(video_path)
+    """Return (source audio, trimmed, start, end, timeline); times are on the video timeline."""
     target_ext = get_config().audio.extension
-
-    if codec == target_ext:
-        codec_command = ["-c:a", "copy"]
-        logger.debug(f"Extracting {target_ext} from video")
-    else:
-        codec_command = ["-c:a", f"{supported_formats[target_ext]['codec']}"]
-        logger.debug(f"Re-encoding {codec} to {target_ext}")
-
     untrimmed_audio = tempfile.NamedTemporaryFile(
         dir=configuration.get_temporary_directory(), suffix=f"_untrimmed.{target_ext}"
     ).name
 
-    command = ffmpeg_base_command_list + ["-i", video_path, "-map", "0:a"] + codec_command + [untrimmed_audio]
+    timeline = extract_audio_without_pauses(video_path, untrimmed_audio, anki_card_creation_time)
+    if timeline is None:
+        timeline = AudioTimeline()
+        codec = get_audio_codec(video_path)
+        if codec == target_ext:
+            logger.debug(f"Extracting {target_ext} from video")
+        else:
+            # Retain the full source for manual expansion without transcoding the
+            # entire replay. Matroska can hold the original audio codec; only the
+            # selected sentence is converted to the configured output format.
+            with tempfile.NamedTemporaryFile(
+                dir=configuration.get_temporary_directory(), suffix="_untrimmed.mka"
+            ) as source_audio:
+                untrimmed_audio = source_audio.name
+            logger.debug(f"Copying {codec} source audio; deferring {target_ext} encoding until after selection")
 
-    logger.debug("Doing initial audio extraction")
-    FFmpegHelper.run(command, check=False)
+        command = ffmpeg_base_command_list + ["-i", video_path, "-map", "0:a", "-c:a", "copy", untrimmed_audio]
+
+        logger.debug("Doing initial audio extraction")
+        FFmpegHelper.run(command, check=False)
 
     trimmed_audio, start_time, end_time = trim_audio_based_on_last_line(
-        untrimmed_audio, video_path, game_line, next_line_time, anki_card_creation_time
+        untrimmed_audio, video_path, game_line, next_line_time, anki_card_creation_time, timeline
     )
-    return untrimmed_audio, trimmed_audio, start_time, end_time
+    return untrimmed_audio, trimmed_audio, start_time, end_time, timeline
+
+
+# Upper bound on a replay's length, so replays with no pause are never probed.
+MAX_REPLAY_SECONDS = 3 * 60 * 60
+
+
+def extract_audio_without_pauses(video_path, output_audio, recording_end_time=None) -> Optional[AudioTimeline]:
+    """Write the replay audio minus the silence of recorded game pauses; None, writing nothing, if there is none."""
+    recording_end = (recording_end_time or get_file_modification_time(video_path)).timestamp()
+    pauses = pause_history.get_pauses_between(recording_end - MAX_REPLAY_SECONDS, recording_end)
+    if not pauses:
+        return None
+    try:
+        probe = FFmpegHelper.get_probe_json(video_path, "format=duration:stream=sample_rate,channels", "a") or {}
+        streams = probe.get("streams", [])
+        if len(streams) != 1:
+            logger.debug(f"Skipping pause silence removal: {len(streams)} audio streams in {video_path}")
+            return None
+        gaps = pause_gaps.expected_gaps(pauses, recording_end, float(probe["format"]["duration"]))
+        if not gaps:
+            return None
+
+        sample_rate, channels = int(streams[0]["sample_rate"]), int(streams[0]["channels"])
+        decode = ffmpeg_base_command_list + ["-i", video_path, "-map", "0:a:0", "-f", "f32le", "-"]
+        decoded = FFmpegHelper.run(decode, check=False, text=False)
+        if decoded.returncode != 0:
+            return None
+        samples = np.frombuffer(decoded.stdout, dtype=np.float32).reshape(-1, channels)
+        pieces, timeline = pause_gaps.remove_pause_gaps(samples, sample_rate, gaps)
+        if not timeline:
+            logger.debug(f"{len(gaps)} game pause(s) in the replay, but no matching silence to remove.")
+            return None
+
+        spec = supported_formats[get_config().audio.extension]
+        encode = ffmpeg_base_command_list + ["-f", "f32le", "-ar", str(sample_rate), "-ac", str(channels), "-i", "-"]
+        encode += ["-c:a", spec["codec"], "-f", spec["format"], output_audio]
+        with subprocess.Popen(encode, stdin=subprocess.PIPE) as proc:
+            for piece in pieces:
+                proc.stdin.write(np.ascontiguousarray(piece).data)
+            proc.stdin.close()
+        if proc.returncode == 0:
+            logger.info(f"Removed {timeline.removed_seconds:.2f}s of silence left by {len(gaps)} game pause(s).")
+            return timeline
+    except (OSError, ValueError, KeyError) as e:
+        logger.warning(f"Pause silence removal failed, using the audio as recorded: {e}")
+    # A partial output would block the caller's fallback extraction (ffmpeg won't overwrite).
+    if os.path.exists(output_audio):
+        os.remove(output_audio)
+    return None
 
 
 def _parse_media_duration(value) -> float | None:
@@ -1388,7 +1594,9 @@ def get_video_duration(file_path):
         return 0.0
 
 
-def trim_audio_based_on_last_line(untrimmed_audio, video_path, game_line, next_line, anki_card_creation_time):
+def trim_audio_based_on_last_line(
+    untrimmed_audio, video_path, game_line, next_line, anki_card_creation_time, timeline: AudioTimeline
+):
     trimmed_audio = tempfile.NamedTemporaryFile(
         dir=configuration.get_temporary_directory(),
         suffix=f".{get_config().audio.extension}",
@@ -1403,30 +1611,37 @@ def trim_audio_based_on_last_line(untrimmed_audio, video_path, game_line, next_l
         if source_padding is None:
             source_padding = TextSource.padding_seconds(getattr(game_line, "source", None))
         start_trim_time = max(0, start_trim_time - float(source_padding))
+    # Trim times stay on the video timeline; the audio may have had pause silence removed.
+    audio_start = timeline.to_audio(start_trim_time)
 
-    ffmpeg_command = ffmpeg_base_command_list + [
-        "-i",
-        untrimmed_audio,
-        "-ss",
-        str(start_trim_time),
-    ]
-
+    audio_end = 0
     if next_line and next_line > game_line.time and total_seconds:
         end_trim_seconds = (
             total_seconds + (next_line - game_line.time).total_seconds() + get_config().audio.pre_vad_end_offset
         )
-        ffmpeg_command.extend(["-to", f"{end_trim_seconds:.3f}"])
+        audio_end = timeline.to_audio(end_trim_seconds)
         logger.debug(f"Trimming end of audio to {end_trim_seconds:.3f} seconds")
     elif get_config().audio.pre_vad_end_offset and get_config().audio.pre_vad_end_offset < 0:
         end_trim_seconds = file_length + get_config().audio.pre_vad_end_offset
-        ffmpeg_command.extend(["-to", str(end_trim_seconds)])
+        audio_end = timeline.to_audio(end_trim_seconds)
         logger.debug(f"Trimming end of audio to {end_trim_seconds} seconds")
 
-    ffmpeg_command.extend(["-c", "copy", trimmed_audio])
+    if Path(untrimmed_audio).suffix.lower() == ".mka":
+        # Input seeking avoids decoding all the dialogue before this sentence.
+        ffmpeg_command = ffmpeg_base_command_list + ["-ss", str(audio_start), "-i", untrimmed_audio]
+        if audio_end:
+            ffmpeg_command.extend(["-t", f"{audio_end - audio_start:.3f}"])
+        ffmpeg_command.extend(["-map", "0:a", "-c:a", supported_formats[get_config().audio.extension]["codec"]])
+    else:
+        ffmpeg_command = ffmpeg_base_command_list + ["-i", untrimmed_audio, "-ss", str(audio_start)]
+        if audio_end:
+            ffmpeg_command.extend(["-to", f"{audio_end:.3f}"])
+        ffmpeg_command.extend(["-c", "copy"])
+    ffmpeg_command.append(trimmed_audio)
 
     FFmpegHelper.run(ffmpeg_command, check=False)
 
-    gsm_state.previous_trim_args = (untrimmed_audio, start_trim_time, end_trim_seconds)
+    gsm_state.previous_trim_args = (untrimmed_audio, audio_start, audio_end)
     logger.debug(f"{total_seconds_after_offset} trimmed off of beginning")
     if source_padding:
         logger.debug(
@@ -1477,9 +1692,7 @@ def reencode_file_with_user_config(input_file, final_output_audio, user_ffmpeg_o
     ext = get_config().audio.extension
     format_spec = supported_formats.get(ext, {})
 
-    command = (
-        ffmpeg_base_command_list + ["-i", input_file, "-map", "0:a"] + user_ffmpeg_options.replace('"', "").split()
-    )
+    command = ffmpeg_base_command_list + ["-i", input_file, "-map", "0:a"] + split_command_line(user_ffmpeg_options)
 
     if "format" in format_spec:
         command.extend(["-f", format_spec["format"]])
@@ -1588,15 +1801,18 @@ def trim_audio(
     fade_out_duration=0.05,
 ):
     command = ffmpeg_base_command_list.copy()
-    command.extend(["-i", input_audio])
+    command.extend(["-i", input_audio, "-vn"])
 
+    fade_in_start = 0
     if trim_beginning and start_time > 0:
         logger.debug(f"trimming beginning to {start_time}")
         command.extend(["-ss", f"{start_time:.2f}"])
+        fade_in_start = start_time
 
     fade_filter = []
     if fade_in_duration > 0:
-        fade_filter.append(f"afade=t=in:d={fade_in_duration}")
+        # -ss after -i still hands the filter the input's timestamps, so fade in from the cut, not from 0.
+        fade_filter.append(f"afade=t=in:st={fade_in_start:.2f}:d={fade_in_duration}")
     if fade_out_duration > 0:
         fade_filter.append(f"afade=t=out:st={end_time - fade_out_duration:.2f}:d={fade_out_duration}")
 
@@ -1616,7 +1832,13 @@ def trim_audio(
         # It blindly added BOTH fades if 'fade_filter' list was not empty. Even if one was 0 duration?
         # Actually `if fade_in_duration > 0` adds to list.
         # So I should join the list.
-        command.extend(["-c:a", supported_formats[get_config().audio.extension]["codec"]])
+    output_extension = Path(output_audio).suffix.lower().lstrip(".") if output_audio else ""
+    convert_format = (
+        output_extension in supported_formats and Path(input_audio).suffix.lower() != f".{output_extension}"
+    )
+    if fade_filter or convert_format:
+        output_spec = supported_formats.get(output_extension, supported_formats[get_config().audio.extension])
+        command.extend(["-c:a", output_spec["codec"]])
     else:
         command.extend(["-c", "copy"])
 
@@ -1709,6 +1931,49 @@ def trim_replay_for_gameline(video_path, start_time, end_time, accurate=False):
     return trimmed_video
 
 
+def _get_format_start_time(file_path):
+    info = FFmpegHelper.get_probe_json(file_path, "format=start_time", "")
+    try:
+        return float(info["format"]["start_time"])
+    except (TypeError, KeyError, ValueError):
+        return None
+
+
+def copy_replay_segment(video_path, start_time, end_time, output_path):
+    """Losslessly copy [start_time, end_time] of a replay into a zero-based clip keeping every stream.
+
+    Stream copy snaps the start back to a keyframe, so the returned value is where the clip really
+    begins, in seconds from the start of the source. Returns None if the copy failed.
+    """
+    root, ext = os.path.splitext(output_path)
+    staged_path = f"{root}.staging{ext}"
+    # -copyts keeps source timestamps, which reveals the keyframe the copy actually started on.
+    FFmpegHelper.run(
+        ffmpeg_base_command_list
+        + ["-ss", str(start_time), "-to", str(end_time), "-i", video_path]
+        + ["-map", "0", "-c", "copy", "-copyts", "-y", staged_path],
+        check=False,
+    )
+    try:
+        staged_start = _get_format_start_time(staged_path) if os.path.isfile(staged_path) else None
+        if staged_start is None:
+            logger.error(f"Failed to copy replay segment {start_time:.2f}s-{end_time:.2f}s of {video_path}")
+            return None
+        FFmpegHelper.run(
+            ffmpeg_base_command_list + ["-i", staged_path, "-map", "0", "-c", "copy", "-y", output_path],
+            check=False,
+        )
+        if not os.path.isfile(output_path):
+            return None
+        source_start = _get_format_start_time(video_path) or 0.0
+        clip_start = max(0.0, staged_start - source_start)
+        logger.info(f"Copied replay segment starting at {clip_start:.2f}s of {video_path} to {output_path}")
+        return clip_start
+    finally:
+        if os.path.exists(staged_path):
+            os.remove(staged_path)
+
+
 def is_video_big_enough(file_path, min_size_kb=250):
     try:
         file_size = os.path.getsize(file_path)
@@ -1720,6 +1985,14 @@ def is_video_big_enough(file_path, min_size_kb=250):
 
 
 def get_audio_length(path):
+    # libsndfile reads headers in-process, avoiding a ffprobe process for each
+    # trimmed/VAD/source clip. Retain FFmpeg for codecs it cannot read (e.g. AAC).
+    try:
+        duration = float(sf.info(path).duration)
+        if math.isfinite(duration) and duration >= 0:
+            return duration
+    except (OSError, RuntimeError, ValueError, TypeError):
+        pass
     return get_video_duration(path)
 
 

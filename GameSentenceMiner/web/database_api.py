@@ -14,6 +14,7 @@ from GameSentenceMiner.util.config.configuration import (
 from GameSentenceMiner.util.cron import cron_scheduler
 from GameSentenceMiner.util.database.db import GameLinesTable
 from GameSentenceMiner.util.database.db import gsm_db, get_db_directory
+from GameSentenceMiner.util.tadoku_sync import TADOKU_TITLE_SOURCES
 from GameSentenceMiner.web.game_profiles import invalidate_game_profiles_cache
 
 
@@ -885,7 +886,6 @@ def register_database_api_routes(app):
             logger.error(f"Error in sentence search: {e}")
             return jsonify({"error": "Search failed"}), 500
 
-
     @app.route("/api/games-list")
     def api_games_list():
         """
@@ -1301,13 +1301,13 @@ def register_database_api_routes(app):
                     "cards_mined_daily_target": getattr(config, "cards_mined_daily_target", 10),
                     "regex_out_punctuation": config.regex_out_punctuation,
                     "regex_out_repetitions": config.regex_out_repetitions,
-                    "reading_time_adaptive_v2": getattr(config, "reading_time_adaptive_v2", False),
                     "extra_punctuation_regex": getattr(config, "extra_punctuation_regex", ""),
                     "tadoku_configured": bool(
                         getattr(config, "tadoku_username", "") and getattr(config, "tadoku_password", "")
                     ),
                     "tadoku_username": getattr(config, "tadoku_username", ""),
                     "tadoku_language_code": getattr(config, "tadoku_language_code", "jpn"),
+                    "tadoku_title_source": getattr(config, "tadoku_title_source", "english"),
                     "tadoku_daily_sync_enabled": bool(getattr(config, "tadoku_daily_sync_enabled", False)),
                     "tadoku_daily_sync_time": getattr(config, "tadoku_daily_sync_time", "00:01"),
                     "tadoku_daily_sync_deduplicate": bool(getattr(config, "tadoku_daily_sync_deduplicate", True)),
@@ -1407,12 +1407,12 @@ def register_database_api_routes(app):
             cards_mined_daily_target = data.get("cards_mined_daily_target")
             regex_out_punctuation = data.get("regex_out_punctuation")
             regex_out_repetitions = data.get("regex_out_repetitions")
-            reading_time_adaptive_v2 = data.get("reading_time_adaptive_v2")
             extra_punctuation_regex = data.get("extra_punctuation_regex")
             tadoku_username = data.get("tadoku_username")
             tadoku_password = data.get("tadoku_password")
             tadoku_clear_credentials = data.get("tadoku_clear_credentials")
             tadoku_language_code = data.get("tadoku_language_code")
+            tadoku_title_source = data.get("tadoku_title_source")
             tadoku_daily_sync_enabled = data.get("tadoku_daily_sync_enabled")
             tadoku_daily_sync_time = data.get("tadoku_daily_sync_time")
             tadoku_daily_sync_deduplicate = data.get("tadoku_daily_sync_deduplicate")
@@ -1535,11 +1535,6 @@ def register_database_api_routes(app):
                     return jsonify({"error": "regex_out_repetitions must be a boolean value"}), 400
                 settings_to_update["regex_out_repetitions"] = regex_out_repetitions
 
-            if reading_time_adaptive_v2 is not None:
-                if not isinstance(reading_time_adaptive_v2, bool):
-                    return jsonify({"error": "reading_time_adaptive_v2 must be a boolean value"}), 400
-                settings_to_update["reading_time_adaptive_v2"] = reading_time_adaptive_v2
-
             if extra_punctuation_regex is not None:
                 if not isinstance(extra_punctuation_regex, str):
                     return jsonify({"error": "extra_punctuation_regex must be a string value"}), 400
@@ -1558,7 +1553,7 @@ def register_database_api_routes(app):
                     return jsonify({"error": "tadoku_username must be a string value"}), 400
                 tadoku_username = tadoku_username.strip()
                 if len(tadoku_username) > 320:
-                    return jsonify({"error": "Tadoku username is too long"}), 400
+                    return jsonify({"error": "Tadoku email is too long"}), 400
                 settings_to_update["tadoku_username"] = tadoku_username
 
             if tadoku_password is not None:
@@ -1582,6 +1577,11 @@ def register_database_api_routes(app):
                 ):
                     return jsonify({"error": "Tadoku language code must be a three-letter ISO 639-3 code"}), 400
                 settings_to_update["tadoku_language_code"] = tadoku_language_code.strip().lower()
+
+            if tadoku_title_source is not None:
+                if not isinstance(tadoku_title_source, str) or tadoku_title_source not in TADOKU_TITLE_SOURCES:
+                    return jsonify({"error": "Tadoku title source must be english, original, or romaji"}), 400
+                settings_to_update["tadoku_title_source"] = tadoku_title_source
 
             for setting_name, setting_value in (
                 ("tadoku_daily_sync_enabled", tadoku_daily_sync_enabled),
@@ -1713,8 +1713,6 @@ def register_database_api_routes(app):
                 config.regex_out_punctuation = settings_to_update["regex_out_punctuation"]
             if "regex_out_repetitions" in settings_to_update:
                 config.regex_out_repetitions = settings_to_update["regex_out_repetitions"]
-            if "reading_time_adaptive_v2" in settings_to_update:
-                config.reading_time_adaptive_v2 = settings_to_update["reading_time_adaptive_v2"]
             if "extra_punctuation_regex" in settings_to_update:
                 config.extra_punctuation_regex = settings_to_update["extra_punctuation_regex"]
             if "tadoku_username" in settings_to_update:
@@ -1725,6 +1723,8 @@ def register_database_api_routes(app):
                 config.tadoku_session_cookie = ""
             if "tadoku_language_code" in settings_to_update:
                 config.tadoku_language_code = settings_to_update["tadoku_language_code"]
+            if "tadoku_title_source" in settings_to_update:
+                config.tadoku_title_source = settings_to_update["tadoku_title_source"]
             if "tadoku_daily_sync_enabled" in settings_to_update:
                 config.tadoku_daily_sync_enabled = settings_to_update["tadoku_daily_sync_enabled"]
             if "tadoku_daily_sync_time" in settings_to_update:

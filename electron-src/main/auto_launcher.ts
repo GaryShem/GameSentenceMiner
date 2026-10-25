@@ -6,7 +6,8 @@ import {
     ObsScene
 } from './ui/obs.js';
 import { getOCRRuntimeState, startManualOCR, startOCR, stopOCR } from './ui/ocr.js';
-import { getOverlayRuntimeState, runOverlayWithSource, stopOverlay } from './ui/front.js';
+import { adoptStartupOverlayForAutomation, getOverlayRuntimeState, runOverlayWithSource, stopOverlay } from './ui/front.js';
+import { activeGame } from './active_game.js';
 import {
     getAgentPath,
     getAgentScriptsPath,
@@ -18,16 +19,19 @@ import {
     getLunaTranslatorPath,
     getObsOcrScenes,
     getGameExePathForScene,
+    getRunOverlayOnStartup,
+    getRunOverlayWithActiveGame,
     getSceneLaunchProfileForScene,
     getSteamGames,
     getTextractorPath32,
     getTextractorPath64,
     getYuzuGamesConfig,
+    getWindowSceneSwitcherConfig,
     runtimeState,
     upsertSceneLaunchProfile
 } from './store.js';
 import type { SceneLaunchProfile, SceneOcrMode, SceneTextHookMode } from './store.js';
-import { exec, ChildProcess, spawn } from 'child_process';
+import { exec, execFile, ChildProcess, spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import {
@@ -44,11 +48,22 @@ import {
     stopHookSessionAndWait,
 } from './ui/texthook.js';
 import { findLinuxGamePid } from './ui/linux_wine.js';
+import { matchWindowSceneRule, normalizeExecutableName, type ForegroundWindowSnapshot } from '../shared/window_scene_switcher.js';
 
 type IntegratedTextHookEngine = "textractor" | "luna" | "agent" | "mages";
 
 export class AutoLauncher {
     private intervalId: NodeJS.Timeout | null = null;
+    private ocrIntervalId: NodeJS.Timeout | null = null;
+    private ocrPolling = false;
+    private pollingEnabled = false;
+    private textHookPollRequested = false;
+    private latestForeground: ForegroundWindowSnapshot | null = null;
+    private latestEmulatorWindow: ForegroundWindowSnapshot | null = null;
+    private readonly foregroundMaxAgeMs = 2_000;
+    private overlayIntervalId: NodeJS.Timeout | null = null;
+    private overlayPolling = false;
+    private pollingGeneration = 0;
     private lastHookedPid: number = -1;
     private lastHookedGameId: string = "";
     private readonly defaultPollingInterval: number = 5000;
@@ -70,7 +85,6 @@ export class AutoLauncher {
     private suppressedAutoOcrSceneId: string = "";
     private suppressedAutoOcrReason: string = "";
     private lastLauncherPollAt: number = 0;
-    private lastOcrPollAt: number = 0;
     private lastTextHookStartFailureKey: string = "";
     private suppressedAutoTextHookSceneId: string = "";
     private suppressedAutoTextHookReason: string = "";
@@ -127,17 +141,35 @@ export class AutoLauncher {
     }
 
     public startPolling() {
-        if (this.intervalId) return;
+        if (this.pollingEnabled) return;
+        this.pollingEnabled = true;
         this.logInternal(
             `Starting AutoLauncher polling... (launcher=${this.defaultPollingInterval}ms, ocr=${this.ocrPollingInterval}ms)`
         );
         this.hasWarnedAboutExternalAgent = false;
         this.lastLauncherPollAt = 0;
-        this.lastOcrPollAt = 0;
+        this.pollingGeneration += 1;
+        this.overlayIntervalId = setInterval(() => void this.pollOverlay(), 1000);
+        void this.pollOverlay();
+        this.ocrIntervalId = setInterval(() => void this.pollOcr(), this.ocrPollingInterval);
+        void this.pollOcr();
         this.scheduleNextPoll(0);
     }
 
     public stopPolling() {
+        this.pollingEnabled = false;
+        this.textHookPollRequested = false;
+        this.latestForeground = null;
+        this.latestEmulatorWindow = null;
+        this.pollingGeneration += 1;
+        if (this.ocrIntervalId) {
+            clearInterval(this.ocrIntervalId);
+            this.ocrIntervalId = null;
+        }
+        if (this.overlayIntervalId) {
+            clearInterval(this.overlayIntervalId);
+            this.overlayIntervalId = null;
+        }
         const wasPolling = this.intervalId !== null;
         if (this.intervalId) {
             clearTimeout(this.intervalId);
@@ -162,6 +194,70 @@ export class AutoLauncher {
             clearTimeout(this.intervalId);
         }
         this.intervalId = setTimeout(() => this.poll(), delay);
+    }
+
+    public handleOBSSceneChanged(): void {
+        this.requestTextHookPoll();
+    }
+
+    public handleForegroundWindowChanged(snapshot: ForegroundWindowSnapshot): void {
+        if (process.platform !== 'win32' || !Number.isInteger(snapshot.pid) || snapshot.pid <= 0) return;
+        const previous = this.latestForeground;
+        if (previous && snapshot.sequence <= previous.sequence && snapshot.capturedAt <= previous.capturedAt) return;
+        const executableName = normalizeExecutableName(snapshot.executableName || snapshot.executablePath);
+        this.latestForeground = { ...snapshot, executableName };
+        const changed = !previous || previous.hwnd !== snapshot.hwnd || previous.pid !== snapshot.pid ||
+            previous.title !== snapshot.title || previous.executableName?.toLowerCase() !== executableName.toLowerCase();
+        if (changed && (this.isSwitchEmulatorExecutable(executableName) ||
+            this.isSwitchEmulatorExecutable(previous?.executableName))) {
+            this.requestTextHookPoll();
+        }
+    }
+
+    private requestTextHookPoll(): void {
+        if (!this.pollingEnabled) return;
+        // Keep a request received during an async pass: its completion must not
+        // overwrite the event with the normal five-second polling deadline.
+        this.textHookPollRequested = true;
+        if (!this.isPolling) this.scheduleNextPoll(0);
+    }
+
+    public handleEmulatorWindowChanged(snapshot: ForegroundWindowSnapshot): void {
+        if (process.platform !== 'win32' || !Number.isInteger(snapshot.pid) || snapshot.pid <= 0) return;
+        const executableName = normalizeExecutableName(snapshot.executableName || snapshot.executablePath);
+        if (!this.isSwitchEmulatorExecutable(executableName)) return;
+        const previous = this.latestEmulatorWindow;
+        if (previous && snapshot.sequence <= previous.sequence && snapshot.capturedAt <= previous.capturedAt) return;
+        this.latestEmulatorWindow = { ...snapshot, executableName };
+        if (!previous || previous.hwnd !== snapshot.hwnd || previous.pid !== snapshot.pid || previous.title !== snapshot.title) {
+            console.info(`[AgentStartup] Window detected: ${executableName} PID ${snapshot.pid}, title=${JSON.stringify(snapshot.title)}.`);
+            this.requestTextHookPoll();
+        }
+    }
+
+    private getFreshTargetWindow(processName?: string, pid?: number): ForegroundWindowSnapshot | null {
+        return [this.latestForeground, this.latestEmulatorWindow]
+            .filter((snapshot): snapshot is ForegroundWindowSnapshot => {
+                if (!snapshot || (pid !== undefined && snapshot.pid !== pid)) return false;
+                if (processName && snapshot.executableName?.toLowerCase() !== normalizeExecutableName(processName).toLowerCase()) return false;
+                const age = Date.now() - snapshot.capturedAt;
+                return age >= 0 && age <= this.foregroundMaxAgeMs;
+            })
+            .sort((left, right) => right.capturedAt - left.capturedAt)[0] ?? null;
+    }
+
+    private async pollOcr(): Promise<void> {
+        if (this.ocrPolling || !this.pollingEnabled) return;
+        this.ocrPolling = true;
+        const generation = this.pollingGeneration;
+        try {
+            const scene = await this.resolveCurrentScene();
+            if (scene && generation === this.pollingGeneration) await this.runOcrAutomation(scene);
+        } catch (error) {
+            this.errorInternal('AutoLauncher OCR poll error:', error);
+        } finally {
+            this.ocrPolling = false;
+        }
     }
 
     private killAgent() {
@@ -394,6 +490,9 @@ export class AutoLauncher {
     }
 
     private async isSceneSessionActive(scene: ObsScene): Promise<boolean | null> {
+        // OCR and overlay automation use the same current capture/window evidence.
+        // Keep the legacy probe for older/standalone backends that never publish it.
+        if (activeGame.hasSnapshot()) return activeGame.get(scene.name);
         this.syncOutputProbeScene(scene);
 
         const executableName = await this.resolveSceneExecutableName(scene);
@@ -432,7 +531,7 @@ export class AutoLauncher {
             return null;
         }
         const scene = value as Partial<ObsScene>;
-        if (typeof scene.id !== "string" || typeof scene.name !== "string") {
+        if (typeof scene.id !== "string" || !scene.id.trim() || typeof scene.name !== "string" || !scene.name.trim()) {
             return null;
         }
         return { id: scene.id, name: scene.name };
@@ -440,13 +539,15 @@ export class AutoLauncher {
 
     private async resolveCurrentScene(): Promise<ObsScene | null> {
         try {
-            return await getCurrentScene();
+            const scene = this.toObsScene(await getCurrentScene());
+            if (scene) return scene;
         } catch (error) {
             const cached = this.toObsScene(runtimeState.get('obs.activeScene'));
             if (cached) return cached;
             this.warnInternal('AutoLauncher: Unable to resolve current OBS scene.', error);
             return null;
         }
+        return this.toObsScene(runtimeState.get('obs.activeScene'));
     }
 
     private resolveDesiredOcrMode(
@@ -557,28 +658,47 @@ export class AutoLauncher {
         }
     }
 
-    private async runOverlayAutomation(currentScene: ObsScene) {
+    private async pollOverlay() {
+        if (this.overlayPolling) return;
+        this.overlayPolling = true;
+        const generation = this.pollingGeneration;
         try {
-            this.syncOutputProbeScene(currentScene);
-            const sceneProfile = getSceneLaunchProfileForScene(currentScene);
-            const shouldLaunchOverlay = sceneProfile?.launchOverlay === true;
+            const scene = await this.resolveCurrentScene();
+            if (generation === this.pollingGeneration) await this.runOverlayAutomation(scene);
+        } catch (error) {
+            this.errorInternal('[AutoLauncher:Overlay] poll error:', error);
+        } finally {
+            this.overlayPolling = false;
+        }
+    }
+
+    private async runOverlayAutomation(currentScene: ObsScene | null) {
+        try {
+            // Global startup takes precedence while retaining saved scene preferences.
+            if (getRunOverlayOnStartup()) {
+                return;
+            }
+            const sceneProfile = currentScene ? getSceneLaunchProfileForScene(currentScene) : null;
+            const shouldLaunchOverlay = getRunOverlayWithActiveGame() || sceneProfile?.launchOverlay === true;
+
+            // Losing contact with OBS is not proof that the selected game closed.
+            if (!currentScene && !getRunOverlayWithActiveGame()) return;
 
             if (!shouldLaunchOverlay) {
                 this.stopOverlayAutomation();
                 return;
             }
 
-            const runtime = getOverlayRuntimeState();
-            if (runtime.isRunning) {
+            adoptStartupOverlayForAutomation();
+            const isSceneActive = activeGame.get(currentScene?.name);
+            if (isSceneActive === false) {
+                this.stopOverlayAutomation();
                 return;
             }
-
-            const isSceneActive = await this.isSceneSessionActive(currentScene);
-            if (!isSceneActive) {
-                return;
-            }
-
+            if (isSceneActive !== true || getOverlayRuntimeState().isRunning) return;
+            const generation = this.pollingGeneration;
             await runOverlayWithSource("auto-launcher");
+            if (generation !== this.pollingGeneration) this.stopOverlayAutomation();
         } catch (error) {
             this.errorInternal('[AutoLauncher:Overlay] poll error:', error);
         }
@@ -588,7 +708,7 @@ export class AutoLauncher {
     private async isAgentAlreadyRunning(): Promise<boolean> {
         return new Promise((resolve) => {
             if (process.platform !== "win32") {
-                exec('pgrep -x Agent', (error, stdout) => {
+                execFile('pgrep', ['-x', 'Agent'], (error, stdout) => {
                     resolve(!error && stdout.trim().length > 0);
                 });
                 return;
@@ -596,8 +716,7 @@ export class AutoLauncher {
 
             const agentPath = getAgentPath();
             const agentExeName = agentPath ? path.basename(agentPath) : 'Agent.exe';
-            const command = `tasklist /FI "IMAGENAME eq ${agentExeName}" /FO CSV /NH`;
-            exec(command, (error, stdout) => {
+            execFile('tasklist', ['/FI', `IMAGENAME eq ${agentExeName}`, '/FO', 'CSV', '/NH'], (error, stdout) => {
                 if (error || stdout.trim().toLowerCase().includes("no tasks are running")) {
                     resolve(false);
                     return;
@@ -616,8 +735,7 @@ export class AutoLauncher {
 
         return new Promise((resolve) => {
             if (process.platform === "win32") {
-                const command = `tasklist /FI "IMAGENAME eq ${processName}" /FO CSV /NH`;
-                exec(command, (error, stdout) => {
+                execFile('tasklist', ['/FI', `IMAGENAME eq ${processName}`, '/FO', 'CSV', '/NH'], (error, stdout) => {
                     if (error || stdout.trim().toLowerCase().includes("no tasks are running")) {
                         resolve(false);
                         return;
@@ -630,7 +748,8 @@ export class AutoLauncher {
             }
 
             const nameWithoutExtension = processName.replace(/\.exe$/i, '');
-            exec(`pgrep -x "${nameWithoutExtension}"`, (error, stdout) => {
+            const literalPattern = `^${nameWithoutExtension.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`;
+            execFile('pgrep', [literalPattern], (error, stdout) => {
                 resolve(!error && stdout.trim().length > 0);
             });
         });
@@ -927,17 +1046,33 @@ export class AutoLauncher {
             return;
         }
 
+        const generation = this.pollingGeneration;
         const gamePid = await this.getPidByProcessName(exeName);
         if (gamePid <= 0) {
             return;
         }
 
+        let validateContext: ((pid: number) => Promise<boolean>) | undefined;
+        if (engine === 'agent' && sceneId && process.platform === 'win32' && this.isSwitchEmulatorExecutable(exeName)) {
+            const scene = await this.resolveCurrentScene();
+            if (!scene || scene.id !== sceneId) return;
+            // Existing built-in profiles may use an arbitrary scene label.
+            // A saved scene-switcher rule, when present, supplies the game identity.
+            validateContext = this.createSwitchContextValidator(scene, exeName, scene.name, false);
+            if (!(await validateContext(gamePid))) return;
+        }
+        const desiredAgentScript = engine === 'agent'
+            ? agentScriptPath?.trim() || getProfileFor(exeName, sceneId)?.agentScriptPath?.trim()
+            : undefined;
         const currentStatus = getRuntimeStatus();
         if (currentStatus.running) {
             if (
                 currentStatus.pid === gamePid &&
                 currentStatus.engine === engine &&
-                currentStatus.exeName.toLowerCase() === exeName.toLowerCase()
+                currentStatus.exeName.toLowerCase() === exeName.toLowerCase() &&
+                (!desiredAgentScript || (currentStatus.engine === 'agent' &&
+                    this.normalizeAgentScriptPath(currentStatus.agentScriptPath) ===
+                        this.normalizeAgentScriptPath(desiredAgentScript)))
             ) {
                 return;
             }
@@ -977,6 +1112,13 @@ export class AutoLauncher {
             }
         }
 
+        if (generation !== this.pollingGeneration || (validateContext && !(await validateContext(gamePid)))) return;
+        const targetWindow = this.getFreshTargetWindow(exeName, gamePid);
+        const arch = targetWindow?.processArchitecture;
+        const requestStartedAt = Date.now();
+        if (engine === 'agent') {
+            console.info(`[AgentStartup] Attach requested: ${exeName} PID ${gamePid}; window age=${targetWindow ? requestStartedAt - targetWindow.capturedAt : 'unknown'}ms; architecture=${arch ?? 'detect'}.`);
+        }
         const result = await startHookSession({
             engine,
             exeName,
@@ -984,7 +1126,11 @@ export class AutoLauncher {
             source: "auto-launcher",
             sceneId,
             agentScriptPath,
+            ...(arch === 'x86' || arch === 'x64' ? { archOverride: arch } : {}),
         });
+        if (engine === 'agent') {
+            console.info(`[AgentStartup] Attach ${result.success ? 'ready' : 'failed'}: ${exeName} PID ${gamePid} in ${Date.now() - requestStartedAt}ms.`);
+        }
         const failureKey = `${engine}:${exeName}:${gamePid}:${result.error ?? "unknown"}`;
 
         if (!result.success) {
@@ -1007,10 +1153,12 @@ export class AutoLauncher {
     // On Windows, fetch the live window title for a PID using PowerShell (MainWindowTitle).
     // Returns null if unavailable or on non-Windows platforms.
     private async getLiveWindowTitle(pid: number): Promise<string | null> {
+        const foreground = this.getFreshTargetWindow(undefined, pid);
+        if (foreground) return foreground.title || null;
         return new Promise((resolve) => {
             if (process.platform !== "win32" || pid <= 0) return resolve(null);
 
-            const cmd = `powershell -NoLogo -NoProfile -Command "${'$'}p=Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if (${'$'}p -and ${'$'}p.MainWindowTitle) { ${'$'}p.MainWindowTitle }"`;
+            const cmd = `powershell -NoLogo -NoProfile -Command "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); ${'$'}p=Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if (${'$'}p -and ${'$'}p.MainWindowTitle) { ${'$'}p.MainWindowTitle }"`;
             exec(cmd, { windowsHide: true }, (err, stdout) => {
                 if (err) return resolve(null);
                 const title = stdout.trim();
@@ -1020,94 +1168,68 @@ export class AutoLauncher {
     }
 
     private async getPidByProcessName(processName: string): Promise<number> {
-        const retryInterval = 1000;
-        const timeout = 5000;
-
+        const foreground = this.getFreshTargetWindow(processName);
+        if (foreground) {
+            return foreground.pid;
+        }
         if (process.platform === "linux") {
-            return new Promise((resolve) => {
-                const startedAt = Date.now();
-                const tryResolve = () => {
-                    const pid = findLinuxGamePid(processName);
-                    if (pid > 0) {
-                        resolve(pid);
-                    } else if (Date.now() - startedAt >= timeout) {
-                        resolve(-1);
-                    } else {
-                        setTimeout(tryResolve, retryInterval);
-                    }
-                };
-                tryResolve();
-            });
+            return findLinuxGamePid(processName);
         }
 
         return new Promise((resolve) => {
             let command: string;
+            let args: string[];
 
             if (process.platform === "win32") {
-                command = `tasklist /FI "IMAGENAME eq ${processName}" /FO CSV /NH`;
+                command = 'tasklist';
+                args = ['/FI', `IMAGENAME eq ${processName}`, '/FO', 'CSV', '/NH'];
             } else {
-                command = `pgrep ${processName}`;
+                command = 'pgrep';
+                args = [`^${processName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`];
             }
 
-            const startTime = Date.now();
+            // The outer poll and window events retry discovery. Waiting here
+            // would block a newly launched game behind an absent old process.
+            execFile(command, args, (error, stdout) => {
+                if (error) {
+                    resolve(-1);
+                    return;
+                }
 
-            const tryGetPid = () => {
-                exec(command, (error, stdout) => {
-                    if (error) {
-                        if (Date.now() - startTime >= timeout) {
-                            resolve(-1);
-                        } else {
-                            setTimeout(tryGetPid, retryInterval);
-                        }
-                        return;
-                    }
+                interface ProcessCandidate {
+                    pid: number;
+                    memory: number;
+                }
 
-                    interface ProcessCandidate {
-                        pid: number;
-                        memory: number;
-                    }
+                const candidates: ProcessCandidate[] = [];
+                const lines = stdout.trim().split(/\r?\n/);
 
-                    const candidates: ProcessCandidate[] = [];
-                    const lines = stdout.trim().split(/\r?\n/);
-
-                    lines.forEach((line) => {
-                        if (process.platform === "win32") {
-                            const match = line.match(/"([^"]+)",\s*"(\d+)",\s*"[^"]*",\s*"[^"]*",\s*"([^"]+)"/);
-                            if (!match) {
-                                return;
-                            }
-
-                            const pid = parseInt(match[2], 10);
-                            const memStr = match[3].replace(/[^\d]/g, '');
-                            const memory = parseInt(memStr, 10);
-
-                            if (!isNaN(pid) && memory > 20000) {
-                                candidates.push({ pid, memory: isNaN(memory) ? 0 : memory });
-                            }
+                lines.forEach((line) => {
+                    if (process.platform === "win32") {
+                        const match = line.match(/"([^"]+)",\s*"(\d+)",\s*"[^"]*",\s*"[^"]*",\s*"([^"]+)"/);
+                        if (!match) {
                             return;
                         }
 
-                        const pid = parseInt(line.trim(), 10);
-                        if (!isNaN(pid)) {
-                            candidates.push({ pid, memory: 0 });
-                        }
-                    });
+                        const pid = parseInt(match[2], 10);
+                        const memStr = match[3].replace(/[^\d]/g, '');
+                        const memory = parseInt(memStr, 10);
 
-                    if (candidates.length > 0) {
-                        candidates.sort((a, b) => b.memory - a.memory);
-                        resolve(candidates[0].pid);
+                        if (!isNaN(pid) && memory > 20000) {
+                            candidates.push({ pid, memory });
+                        }
                         return;
                     }
 
-                    if (Date.now() - startTime >= timeout) {
-                        resolve(-1);
-                    } else {
-                        setTimeout(tryGetPid, retryInterval);
+                    const pid = parseInt(line.trim(), 10);
+                    if (!isNaN(pid)) {
+                        candidates.push({ pid, memory: 0 });
                     }
                 });
-            };
 
-            tryGetPid();
+                candidates.sort((a, b) => b.memory - a.memory);
+                resolve(candidates[0]?.pid ?? -1);
+            });
         });
     }
 
@@ -1294,7 +1416,8 @@ export class AutoLauncher {
     private createSwitchContextValidator(
         expectedScene: ObsScene,
         processName: string,
-        expectedTitle: string
+        expectedTitle: string,
+        requireTitleMatch = true,
     ): (pid: number) => Promise<boolean> {
         return async (pid: number) => {
             const scene = await this.resolveCurrentScene();
@@ -1310,7 +1433,17 @@ export class AutoLauncher {
                 return false;
             }
 
-            const matches = this.titlesRoughlyMatch(expectedTitle, liveTitle);
+            // A scene can have an English label while Eden displays a Japanese
+            // game title. Reuse the user's exact scene rule when available.
+            const rules = getWindowSceneSwitcherConfig().collections.flatMap((collection) =>
+                collection.rules.filter((rule) => rule.sceneUuid === expectedScene.id && rule.enabled)
+            );
+            const matches = rules.length > 0
+                ? rules.some((rule) => matchWindowSceneRule(rule, {
+                    hwnd: '', pid, title: liveTitle, executableName: processName,
+                    capturedAt: Date.now(), sequence: 0,
+                }).matched)
+                : !requireTitleMatch || this.titlesRoughlyMatch(expectedTitle, liveTitle);
             if (!matches) {
                 this.logInternal(
                     `AutoLauncher: Switch title mismatch for ${processName}. Expected "${expectedTitle}", got "${liveTitle}".`
@@ -1500,42 +1633,35 @@ export class AutoLauncher {
     }
 
     private computeNextLoopDelay(now: number): number {
-        const timeUntilLauncherPoll = Math.max(
+        return Math.max(
             this.minLoopDelayMs,
             this.currentPollingInterval - (now - this.lastLauncherPollAt)
         );
-        const timeUntilOcrPoll = Math.max(
-            this.minLoopDelayMs,
-            this.ocrPollingInterval - (now - this.lastOcrPollAt)
-        );
-        return Math.min(timeUntilLauncherPoll, timeUntilOcrPoll);
     }
 
     private async poll() {
+        if (!this.pollingEnabled) return;
         if (this.isPolling) {
             this.scheduleNextPoll(this.minLoopDelayMs);
             return;
         }
 
         this.isPolling = true;
+        const requested = this.textHookPollRequested;
+        this.textHookPollRequested = false;
+        const generation = this.pollingGeneration;
         const startTime = Date.now();
         let keepFastPolling = false;
 
         try {
             const currentScene = await this.resolveCurrentScene();
-            if (!currentScene) {
+            if (!currentScene || generation !== this.pollingGeneration) {
                 return;
             }
 
-            if (startTime - this.lastLauncherPollAt >= this.currentPollingInterval) {
+            if (requested || startTime - this.lastLauncherPollAt >= this.currentPollingInterval) {
                 keepFastPolling = await this.runTextHookAutomation(currentScene);
                 this.lastLauncherPollAt = startTime;
-            }
-
-            if (startTime - this.lastOcrPollAt >= this.ocrPollingInterval) {
-                await this.runOcrAutomation(currentScene);
-                await this.runOverlayAutomation(currentScene);
-                this.lastOcrPollAt = startTime;
             }
         } catch (error) {
             this.errorInternal("AutoLauncher poll error:", error);
@@ -1548,7 +1674,9 @@ export class AutoLauncher {
                 );
             }
             const now = Date.now();
-            this.scheduleNextPoll(this.computeNextLoopDelay(now));
+            if (this.pollingEnabled && generation === this.pollingGeneration) {
+                this.scheduleNextPoll(this.textHookPollRequested ? 0 : this.computeNextLoopDelay(now));
+            }
         }
     }
 
@@ -1657,7 +1785,7 @@ export class AutoLauncher {
     private launchAgent(pid: number, scriptPath: string) {
         const command = `"${getAgentPath()}" --script="${scriptPath}" --pname=${pid}`;
         this.logInternal(`AutoLauncher: Launching agent: ${command}`);
-        const child = exec(command, { windowsHide: getLaunchAgentMinimized() }, (error) => {
+        const child = execFile(getAgentPath(), [`--script=${scriptPath}`, `--pname=${pid}`], { windowsHide: getLaunchAgentMinimized() }, (error) => {
             if (error) {
                 this.errorInternal('AutoLauncher: Error launching agent:', error);
             }
@@ -1697,10 +1825,15 @@ export class AutoLauncher {
         return minSize > 0 ? overlap / minSize >= 0.6 : false;
     }
 
+    private normalizeAgentScriptPath(value: string): string {
+        const resolved = path.resolve(value);
+        return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+    }
+
     private normalizeTitle(value: string): string {
         return value
             .toLowerCase()
-            .replace(/[^a-z0-9\s]/g, ' ')
+            .replace(/[^\p{L}\p{N}\s]/gu, ' ')
             .replace(/\s+/g, ' ')
             .trim();
     }

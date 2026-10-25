@@ -5,6 +5,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import requests
 from watchdog.events import FileSystemEventHandler
@@ -37,6 +38,9 @@ from GameSentenceMiner.util.media import ffmpeg
 from GameSentenceMiner.util.media.ffmpeg import get_audio_and_trim, get_audio_length
 from GameSentenceMiner.util.models.model import VADResult
 from GameSentenceMiner.vad import vad_processor
+
+if TYPE_CHECKING:
+    from GameSentenceMiner.util.media.pause_gaps import AudioTimeline
 
 
 def _handle_texthooker_button(video_path: str) -> None:
@@ -71,6 +75,8 @@ class AudioEditContext:
     range_start: float
     range_end: float
     rebase_on_selection_trim: bool = False
+    # Maps the video timeline to positions in source_audio_path (pause silence removed).
+    timeline: "AudioTimeline | None" = None
 
 
 @dataclass
@@ -233,6 +239,7 @@ class ReplayAudioExtractor:
                 or gsm_state.line_for_screenshot
                 or gsm_state.line_for_video_trim
                 or gsm_state.lines_for_media_creation
+                or gsm_state.pending_clip_saves
             ):
                 return _TEXTHOOKER_REPLAY_JOB
             while anki.card_queue:
@@ -255,7 +262,16 @@ class ReplayAudioExtractor:
         return bool(getattr(vad_config, "cut_and_splice_segments", False))
 
     @staticmethod
-    def _build_audio_edit_context(source_audio_path, start_time, end_time, vad_result):
+    def _rebase_vad_on_video(timeline, start_time, vad_result):
+        """Turn VAD offsets measured in the pause-cleaned audio into offsets from `start_time` on the video."""
+        if not timeline or not vad_result or not vad_result.success:
+            return
+        audio_start = timeline.to_audio(start_time)
+        vad_result.start = timeline.to_source(audio_start + vad_result.start) - start_time
+        vad_result.end = timeline.to_source(audio_start + vad_result.end, before_cut=True) - start_time
+
+    @staticmethod
+    def _build_audio_edit_context(source_audio_path, start_time, end_time, vad_result, timeline=None):
         if not source_audio_path:
             return None
 
@@ -264,7 +280,7 @@ class ReplayAudioExtractor:
             return None
 
         current_start = max(0.0, float(start_time or 0.0))
-        current_end = float(end_time) if end_time and end_time > 0 else source_duration
+        current_end = float(end_time) if end_time and end_time > 0 else None
 
         if vad_result and getattr(vad_result, "tts_used", False):
             return None
@@ -277,10 +293,16 @@ class ReplayAudioExtractor:
             vad_start = max(0.0, float(getattr(vad_result, "start", 0.0) or 0.0))
             vad_end = float(getattr(vad_result, "end", 0.0) or 0.0)
             if get_config().vad.trim_beginning:
-                current_start = min(source_duration, current_start + vad_start)
+                current_start += vad_start
             if vad_end > 0:
-                current_end = min(source_duration, float(start_time or 0.0) + vad_end)
+                current_end = float(start_time or 0.0) + vad_end
 
+        # Positions so far are on the video; the source audio may have had pause silence removed.
+        if timeline:
+            current_start = timeline.to_audio(current_start)
+            current_end = timeline.to_audio(current_end) if current_end is not None else None
+        if current_end is None:
+            current_end = source_duration
         current_start = max(0.0, min(current_start, source_duration))
         current_end = max(current_start, min(current_end, source_duration))
 
@@ -290,6 +312,7 @@ class ReplayAudioExtractor:
             range_start=current_start,
             range_end=current_end,
             rebase_on_selection_trim=ReplayAudioExtractor._should_rebase_audio_edit_context(vad_result),
+            timeline=timeline,
         )
 
     @staticmethod
@@ -427,7 +450,7 @@ class ReplayAudioExtractor:
 
             # Just for safety
             if not context.last_note:
-                if get_config().anki.update_anki:
+                if get_config().anki.enabled:
                     with time_anki_card_block(context.timing_context, "replay.get_last_anki_card"):
                         context.last_note = anki.get_last_anki_card()
 
@@ -467,15 +490,7 @@ class ReplayAudioExtractor:
             if context.last_note:
                 logger.debug(context.last_note.pretty_print())
 
-            with time_anki_card_block(context.timing_context, "replay.get_screenshot_time"):
-                context.ss_timing = ffmpeg.get_screenshot_time(
-                    video_path,
-                    context.mined_line,
-                    doing_multi_line=bool(context.selected_lines),
-                    anki_card_creation_time=context.anki_card_creation_time,
-                )
-
-            with ThreadPoolExecutor(max_workers=3, thread_name_prefix="gsm-card-prep") as executor:
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="gsm-card-prep") as executor:
                 audio_future = None
                 media_future = None
                 translation_future = context.translation_future
@@ -509,7 +524,15 @@ class ReplayAudioExtractor:
                     elif not get_config().anki.sentence_audio_field:
                         logger.info("No SentenceAudio Field in config, skipping audio processing!")
 
-                if get_config().anki.update_anki and context.last_note:
+                if get_config().anki.enabled and context.last_note:
+                    # Audio extraction can run while the screenshot timestamp is probed.
+                    with time_anki_card_block(context.timing_context, "replay.get_screenshot_time"):
+                        context.ss_timing = ffmpeg.get_screenshot_time(
+                            video_path,
+                            context.mined_line,
+                            doing_multi_line=bool(context.selected_lines),
+                            anki_card_creation_time=context.anki_card_creation_time,
+                        )
                     media_future = executor.submit(
                         run_anki_card_timed,
                         context.timing_context,
@@ -522,7 +545,9 @@ class ReplayAudioExtractor:
                         timing_context=context.timing_context,
                     )
                     if get_config().ai.add_to_anki and translation_future is None:
-                        translation_future = executor.submit(
+                        # A local executor joins its tasks on exit. Translation must
+                        # outlive preparation so the dialog can display it as it arrives.
+                        translation_future = anki.translation_prefetch_executor.submit(
                             run_anki_card_timed,
                             context.timing_context,
                             "replay.future.prefetch_ai_translation",
@@ -586,7 +611,7 @@ class ReplayAudioExtractor:
                         except Exception as e:
                             logger.exception(f"Failed to start animated screenshot prefetch early: {e}")
 
-            if get_config().anki.update_anki and context.last_note:
+            if get_config().anki.enabled and context.last_note:
                 with time_anki_card_block(context.timing_context, "replay.schedule_update_anki_card"):
                     context.background_update_started = bool(
                         anki.update_anki_card(
@@ -612,7 +637,7 @@ class ReplayAudioExtractor:
                             timing_context=context.timing_context,
                         )
                     )
-            elif get_config().features.notify_on_update and context.vad_result and context.vad_result.success:
+            elif get_config().features.notify_on_audio_generated and context.vad_result and context.vad_result.success:
                 from GameSentenceMiner.util.platform import notification
 
                 notification.send_audio_generated_notification(context.vad_trimmed_audio)
@@ -663,7 +688,7 @@ class ReplayAudioExtractor:
         timing_context: AnkiCardTimingContext | None = None,
     ) -> ReplayAudioResult | VADResult | str:
         with time_anki_card_block(timing_context, "replay.audio.get_audio_and_trim", log_start=True):
-            source_audio_path, trimmed_audio, start_time, end_time = get_audio_and_trim(
+            source_audio_path, trimmed_audio, start_time, end_time, timeline = get_audio_and_trim(
                 video_path, game_line, next_line_time, anki_card_creation_time
             )
         if temporary:
@@ -728,6 +753,7 @@ class ReplayAudioExtractor:
                     start_time,
                     end_time,
                     None,
+                    timeline,
                 ),
             )
 
@@ -738,6 +764,7 @@ class ReplayAudioExtractor:
 
         with time_anki_card_block(timing_context, "replay.audio.vad_postprocess", log_start=True):
             vad_result = vad_processor.trim_audio_with_vad(trimmed_audio, vad_trimmed_audio, game_line, full_text)
+        ReplayAudioExtractor._rebase_vad_on_video(timeline, start_time, vad_result)
         if vad_result and vad_result.success and not getattr(vad_result, "trimmed_audio_path", None):
             vad_result.trimmed_audio_path = trimmed_audio
         if timing_only:
@@ -745,7 +772,9 @@ class ReplayAudioExtractor:
 
         if not vad_result.success:
             # Store the trimmed audio path so it can be offered to the user in the confirmation dialog
-            if get_config().anki.show_update_confirmation_dialog_v2:
+            if get_config().anki.show_update_confirmation_dialog_v2 and not getattr(
+                get_config().anki, "skip_confirmation_for_unvoiced", False
+            ):
                 vad_result.trimmed_audio_path = trimmed_audio
                 if os.path.exists(trimmed_audio):
                     final_audio_output = trimmed_audio
@@ -828,18 +857,27 @@ class ReplayAudioExtractor:
                 start_time,
                 end_time,
                 vad_result,
+                timeline,
             ),
         )
+
+
+# Keep ordinary cards serialized so their shared Anki/dialog state cannot overlap.
+card_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gsm-replay")
+
+
+def process_replay_file(video_path, queued_job) -> Future:
+    """Run queued_job on an existing video instead of a new OBS replay, on the card worker."""
+    return card_executor.submit(ReplayAudioExtractor().process_replay, video_path, queued_job=queued_job)
 
 
 class ReplayFileWatcher(FileSystemEventHandler):
     def __init__(self, extractor: ReplayAudioExtractor, executor=None, refresh_executor=None):
         super().__init__()
         self._extractor = extractor
-        # Keep ordinary cards serialized so their shared Anki/dialog state cannot
-        # overlap. Follow-up dialogue replays get a separate lane, which is what
-        # lets them finish while the original card worker is blocked on the dialog.
-        self._executor = executor or ThreadPoolExecutor(max_workers=1, thread_name_prefix="gsm-replay")
+        # Follow-up dialogue replays get a separate lane, which is what lets them
+        # finish while the card worker is blocked on the dialog.
+        self._executor = executor or card_executor
         self._refresh_executor = refresh_executor or ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="gsm-dialogue-replay"
         )

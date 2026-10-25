@@ -1,4 +1,4 @@
-import {exec, execFile} from "child_process";
+import {execFile} from "child_process";
 import {readdirSync} from "fs";
 import {join, resolve} from "path";
 import {isMainThread, parentPort, Worker} from "worker_threads";
@@ -94,7 +94,9 @@ function runAgentScript(gameId: string, yuzuPid: number) {
 
     const command = `"${getAgentPath()}" --script="${agentScript}" --pname=${yuzuPid}`;
     console.log(`Running agent script: ${command}`);
-    exec(command, { windowsHide: getLaunchAgentMinimized() });
+    execFile(getAgentPath(), [`--script=${agentScript}`, `--pname=${yuzuPid}`], { windowsHide: getLaunchAgentMinimized() }, (error) => {
+        if (error) console.error('Error running agent script:', error);
+    });
 }
 
 /**
@@ -155,6 +157,8 @@ export function openYuzuWindow() {
     yuzuWindow = new BrowserWindow({
         width: 800,
         height: 600,
+        minWidth: 800,
+        minHeight: 500,
         webPreferences: getSecureWebPreferences(),
     });
 

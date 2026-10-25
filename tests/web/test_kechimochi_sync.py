@@ -9,9 +9,11 @@ import json
 import os
 import subprocess
 import sys
+import time
 import uuid
 import zlib
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import flask
 import pytest
@@ -23,7 +25,12 @@ from GameSentenceMiner.util.database.game_daily_rollup_table import GameDailyRol
 from GameSentenceMiner.util.database.games_table import GamesTable
 from GameSentenceMiner.util.database.kechimochi_sync_state import KechimochiSyncState
 from GameSentenceMiner.util.database.third_party_stats_table import ThirdPartyStatsTable
-from GameSentenceMiner.util.kechimochi_client import KechimochiClient, KechimochiSyncError, normalize_kechimochi_url
+from GameSentenceMiner.util.kechimochi_client import (
+    KechimochiClient,
+    KechimochiHTTPError,
+    KechimochiSyncError,
+    normalize_kechimochi_url,
+)
 from GameSentenceMiner.util.kechimochi_sync import build_kechimochi_snapshot, run_kechimochi_sync, run_state_key
 
 
@@ -132,6 +139,67 @@ def test_live_stats_replace_stale_rollup_without_double_counting():
     line("old", "game", "2020-01-01", "日本語")
     snapshot = build_kechimochi_snapshot(config=config())
     assert sum(row["characters"] for row in snapshot.logs.values()) == 3
+
+
+def test_empty_native_activity_is_omitted_without_resurrecting_stale_rollups(database):
+    GamesTable(id="game", title_original="Game").save()
+    GameDailyRollupTable(date="2020-01-01", game_id="game", total_characters=999).save()
+    line("empty", "game", "2020-01-01", "…………。")
+
+    snapshot = build_kechimochi_snapshot(config=config())
+    assert snapshot.logs == {}
+    assert snapshot.observed_native == {"native:game:game:2020-01-01"}
+    assert "game:game" in snapshot.media
+
+    remote = Remote()
+    assert run_kechimochi_sync(config=config(), client=remote)["logs_created"] == 0
+    database.execute("DELETE FROM game_lines WHERE id='empty'", commit=True)
+    assert run_kechimochi_sync(config=config(), client=remote)["logs_created"] == 0
+    assert remote.logs == []
+
+
+@pytest.mark.parametrize("source", ["rollup", "legacy", "external"])
+@pytest.mark.parametrize("characters,seconds", [(0, 0), (0, 29), (0, 60), (1, 0)])
+def test_snapshot_omits_only_empty_activity_after_rounding(source, characters, seconds):
+    if source == "rollup":
+        GameDailyRollupTable(
+            date="2020-01-01", game_id="game", total_characters=characters, total_reading_time_seconds=seconds
+        ).save()
+    elif source == "legacy":
+        StatsRollupTable(
+            date="2020-01-01", game_activity_data=json.dumps({"game": {"chars": characters, "time": seconds}})
+        ).save()
+    else:
+        ThirdPartyStatsTable(
+            date="2020-01-01", characters_read=characters, time_read_seconds=seconds, source="manual", label="Book"
+        ).save()
+
+    snapshot = build_kechimochi_snapshot(config=config())
+    minutes = round(seconds / 60)
+    assert snapshot.summary()["activity_count"] == int(bool(characters or minutes))
+    assert snapshot.summary()["characters"] == characters
+    assert snapshot.summary()["duration_minutes"] == minutes
+    assert len(snapshot.media) == 1
+
+
+def test_activity_edited_to_empty_removes_only_its_owned_log_and_can_be_restored():
+    GamesTable(id="game", title_original="Game").save()
+    line("old", "game", "2020-01-01", "日本語")
+    remote = Remote()
+    run_kechimochi_sync(config=config(), client=remote)
+    remote.logs.append({**remote.logs[0], "id": 999, "notes": "My own log"})
+
+    line("old", "game", "2020-01-01", "…………。")
+    result = run_kechimochi_sync(config=config(), client=remote)
+    assert result["logs_deleted"] == 1
+    assert result["logs_updated"] == 0
+    assert [row["id"] for row in remote.logs] == [999]
+    assert len(remote.media) == 1
+
+    line("old", "game", "2020-01-01", "日")
+    result = run_kechimochi_sync(config=config(), client=remote)
+    assert result["logs_created"] == 1
+    assert len(remote.logs) == 2
 
 
 def test_full_sync_is_idempotent_and_corrects_historical_edits():
@@ -400,6 +468,59 @@ def test_client_matches_http_contract_and_does_not_retry_ambiguous_posts():
     assert all(call[1]["allow_redirects"] is False for call in session.calls)
 
 
+@pytest.mark.parametrize("error_format", ["text", "error", "message", "detail", "json_string"])
+def test_client_surfaces_kechimochi_validation_error_without_url_hint(error_format):
+    detail = "Activity must have either duration or characters"
+    if error_format == "text":
+        reply = requests.Response()
+        reply.status_code = 400
+        reply.headers["Content-Type"] = "text/plain; charset=utf-8"
+        reply._content = detail.encode()
+    else:
+        reply = response(detail if error_format == "json_string" else {error_format: detail}, status=400)
+    session = Session([reply])
+
+    with pytest.raises(KechimochiHTTPError) as raised:
+        KechimochiClient(session=session).save_log({"characters": 0, "duration_minutes": 0})
+    assert raised.value.status_code == 400
+    assert "POST logs failed (HTTP 400)" in str(raised.value)
+    assert detail in str(raised.value)
+    assert "Check that this URL" not in str(raised.value)
+    assert len(session.calls) == 1
+
+
+@pytest.mark.parametrize("status", [400, 422, 500])
+def test_client_error_without_server_detail_does_not_blame_url(status):
+    reply = requests.Response()
+    reply.status_code = status
+    reply.headers["Content-Type"] = "text/html"
+    reply._content = b"<html>Server error</html>"
+    with pytest.raises(KechimochiHTTPError) as raised:
+        KechimochiClient(session=Session([reply])).save_log({})
+    assert f"HTTP {status}" in str(raised.value)
+    assert "Check that this URL" not in str(raised.value)
+    assert "<html>" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "status,hint",
+    [(403, "Check the HTTP API scope and allowed address"), (404, "Check that this URL points to")],
+)
+def test_client_keeps_actionable_connection_hints(status, hint):
+    with pytest.raises(KechimochiHTTPError, match=hint):
+        KechimochiClient(session=Session([response(None, status=status)])).get_logs()
+
+
+def test_client_limits_and_normalizes_server_error_detail():
+    reply = response({"error": "Invalid activity\n\t" + "x" * 2000}, status=400)
+    with pytest.raises(KechimochiHTTPError) as raised:
+        KechimochiClient(session=Session([reply])).save_log({})
+    message = str(raised.value)
+    assert "Invalid activity x" in message
+    assert "\n" not in message
+    assert len(message) < 600
+
+
 @pytest.mark.parametrize("payload", [{"logs": []}, [None], [{"id": 1}], "<html>"])
 def test_malformed_remote_lists_stop_sync(payload):
     with pytest.raises(KechimochiSyncError):
@@ -485,22 +606,103 @@ def test_disabled_scheduled_sync_does_not_contact_kechimochi(monkeypatch):
     assert cron_module.run_scheduled_kechimochi_sync()["skipped"] is True
 
 
-def test_manual_failure_with_daily_schedule_queues_early_retry(api_client, monkeypatch):
-    import time
+@pytest.fixture
+def sync_logger(monkeypatch):
+    logger = Mock()
+    for module in (
+        "GameSentenceMiner.util.kechimochi_sync",
+        "GameSentenceMiner.util.cron.kechimochi_sync",
+        "GameSentenceMiner.util.cron.run_crons",
+        "GameSentenceMiner.web.kechimochi_api",
+    ):
+        monkeypatch.setattr(f"{module}.logger", logger)
+    return logger
 
+
+@pytest.mark.parametrize("failure", [requests.ConnectionError, requests.Timeout])
+def test_scheduled_connection_failure_is_quiet_and_retries(monkeypatch, sync_logger, failure):
+    from GameSentenceMiner.util import kechimochi_sync as sync_module
+    from GameSentenceMiner.util.cron import kechimochi_sync as cron_module
+    from GameSentenceMiner.util.cron import run_crons
+
+    saved = config(kechimochi_sync_enabled=True, kechimochi_sync_schedule="daily", kechimochi_sync_time="04:30")
+    monkeypatch.setattr(cron_module, "get_stats_config", lambda: saved)
+    remote = KechimochiClient(session=Session([failure("Offline")]))
+    monkeypatch.setattr(sync_module, "KechimochiClient", lambda url: remote)
+    snapshot = Mock(side_effect=AssertionError("Offline sync must not scan local history"))
+    monkeypatch.setattr(sync_module, "build_kechimochi_snapshot", snapshot)
+    state = KechimochiSyncState()
+    key = run_state_key(saved.kechimochi_url)
+    state.put(key, {"status": "completed", "last_success_at": 123})
+    cron = cron_module.configure_kechimochi_cron(config=saved)
+
+    result = run_crons.run_due_crons(due_crons=[cron])
+
+    detail = result["details"][0]
+    assert detail["success"] is False
+    assert "Could not reach Kechimochi" in detail["result"]["error"]
+    assert state.get(key)["status"] == "failed"
+    assert state.get(key)["error"] == detail["result"]["error"]
+    assert state.get(key)["last_success_at"] == 123
+    assert time.time() < cron.next_run <= time.time() + 900
+    snapshot.assert_not_called()
+    sync_logger.error.assert_not_called()
+    sync_logger.exception.assert_not_called()
+    sync_logger.warning.assert_not_called()
+    assert not any("synced 0 activities" in call.args[0] for call in sync_logger.background.call_args_list)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        response(None, 403),
+        response({"invalid": "version"}),
+        requests.RequestException("Bad request"),
+        RuntimeError("Bug"),
+    ],
+    ids=["http-error", "invalid-response", "other-request-error", "unexpected-error"],
+)
+def test_scheduled_other_failures_remain_logged(monkeypatch, sync_logger, reply):
+    from GameSentenceMiner.util import kechimochi_sync as sync_module
+    from GameSentenceMiner.util.cron import kechimochi_sync as cron_module
+    from GameSentenceMiner.util.cron import run_crons
+
+    saved = config(kechimochi_sync_enabled=True)
+    monkeypatch.setattr(cron_module, "get_stats_config", lambda: saved)
+    remote = KechimochiClient(session=Session([reply]))
+    monkeypatch.setattr(sync_module, "KechimochiClient", lambda url: remote)
+    cron = cron_module.configure_kechimochi_cron(config=saved)
+
+    result = run_crons.run_due_crons(due_crons=[cron])
+
+    assert result["details"][0]["success"] is False
+    assert KechimochiSyncState().get(run_state_key(saved.kechimochi_url))["status"] == "failed"
+    sync_logger.error.assert_called_once()
+    sync_logger.exception.assert_called_once()
+    sync_logger.warning.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", [requests.ConnectionError, requests.Timeout])
+def test_manual_connection_failure_is_quiet_and_queues_early_retry(api_client, monkeypatch, sync_logger, failure):
+    from GameSentenceMiner.util import kechimochi_sync as sync_module
     from GameSentenceMiner.web import kechimochi_api
 
     client, holder = api_client
-
-    def offline():
-        KechimochiSyncState().put(run_state_key(holder["config"].kechimochi_url), {"status": "failed"})
-        raise KechimochiSyncError("Offline")
-
-    monkeypatch.setattr(kechimochi_api, "run_kechimochi_sync", offline)
+    remote = KechimochiClient(session=Session([failure("Offline")]))
+    monkeypatch.setattr(sync_module, "KechimochiClient", lambda url: remote)
+    monkeypatch.setattr(sync_module, "get_stats_config", lambda: holder["config"])
+    monkeypatch.setattr(kechimochi_api, "run_kechimochi_sync", run_kechimochi_sync)
     result = client.post("/api/kechimochi/settings", json={"enabled": True, "schedule": "daily"})
     assert result.status_code == 200
     next_run = CronTable.get_by_name("kechimochi_sync").next_run
     assert time.time() < next_run <= time.time() + 900
+    status = client.get("/api/kechimochi/status").get_json()
+    assert status["status"] == "failed"
+    assert "Could not reach Kechimochi" in status["error"]
+    assert kechimochi_api.kechimochi_sync_job_manager.active() is None
+    sync_logger.error.assert_not_called()
+    sync_logger.exception.assert_not_called()
+    sync_logger.warning.assert_not_called()
 
 
 def test_cover_sync_is_idempotent_and_restricted_scope_does_not_block_stats():
@@ -790,6 +992,7 @@ def test_live_kechimochi_roundtrip(database):
         character_count=12345,
     ).save()
     line("fixture-line", "live-fixture", "2001-01-01", "日本語")
+    line("empty-fixture-line", "live-fixture", "2001-01-02", "…………。")
     client = KechimochiClient(saved.kechimochi_url)
     original_save = client.save_log
     fail_once = True
@@ -809,6 +1012,7 @@ def test_live_kechimochi_roundtrip(database):
             run_kechimochi_sync(config=saved, client=client)
         result = run_kechimochi_sync(config=saved, client=client)
         assert result["logs_created"] == 0
+        assert result["activity_count"] == 1
         owned_media = [row for row in client.get_media() if row["title"] == prefix]
         assert len(owned_media) == 1
         media_id = owned_media[0]["id"]
