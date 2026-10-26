@@ -36,6 +36,19 @@ describe('prerelease build contract', () => {
         expect(workflow.match(/electron-src\/assets\/python\/\*\.whl/g)).toHaveLength(3);
     });
 
+    it('builds and bundles the checked-out backend for every stable release platform', () => {
+        const workflow = fs.readFileSync(
+            path.join(process.cwd(), '.github', 'workflows', 'release_exe.yml'),
+            'utf8'
+        );
+
+        expect(workflow.match(/Build release backend wheel/g)).toHaveLength(3);
+        expect(workflow.match(/Smoke test release backend wheel/g)).toHaveLength(3);
+        expect(workflow.match(/write-prerelease-metadata\.mjs/g)).toHaveLength(3);
+        expect(workflow.match(/--out electron-src\/assets\/backend\.json/g)).toHaveLength(3);
+        expect(workflow.match(/python -m cibuildwheel --output-dir electron-src\/assets\/python/g)).toHaveLength(3);
+    });
+
     it('builds one app-targeted wheel and skips whole-wheel native repair on Unix', () => {
         const workflow = fs.readFileSync(
             path.join(process.cwd(), '.github', 'workflows', 'dev_release_exe.yml'),

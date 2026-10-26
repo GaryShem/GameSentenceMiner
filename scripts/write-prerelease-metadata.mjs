@@ -65,7 +65,7 @@ function main() {
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.writeFileSync(outputPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
-  console.log(`Wrote prerelease metadata for ${metadata.backendWheel.fileName} to ${outputPath}`);
+  console.log(`Wrote backend metadata for ${metadata.backendWheel.fileName} to ${outputPath}`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

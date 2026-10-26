@@ -110,6 +110,8 @@ interface PreReleaseMetadata {
     };
 }
 
+type BackendMetadata = PreReleaseMetadata;
+
 function readPreReleaseMetadata(): PreReleaseMetadata | null {
     const candidates = [
         path.join(getResourcesDir(), 'prerelease.json'),
@@ -131,6 +133,27 @@ function readPreReleaseMetadata(): PreReleaseMetadata | null {
     return null;
 }
 
+function readBundledBackendMetadata(): BackendMetadata | null {
+    const candidates = [
+        path.join(getResourcesDir(), 'backend.json'),
+        path.join(getAssetsDir(), 'backend.json'),
+        path.join(getResourcesDir(), 'assets', 'backend.json'),
+    ];
+    const seen = new Set<string>();
+    for (const candidate of candidates) {
+        if (!candidate || seen.has(candidate) || !fs.existsSync(candidate)) {
+            continue;
+        }
+        seen.add(candidate);
+        try {
+            return JSON.parse(fs.readFileSync(candidate, 'utf8')) as BackendMetadata;
+        } catch (error) {
+            console.warn(`Failed to parse bundled backend metadata at ${candidate}:`, error);
+        }
+    }
+    return readPreReleaseMetadata();
+}
+
 /** Return the source branch recorded in a packaged prerelease. */
 export function resolvePreReleaseBranch(): string | null {
     const branch = readPreReleaseMetadata()?.branch;
@@ -138,12 +161,12 @@ export function resolvePreReleaseBranch(): string | null {
 }
 
 /**
- * Resolve the platform wheel bundled into a prerelease app. A prerelease with
- * missing or unsafe wheel metadata is a broken build and must fail explicitly;
+ * Resolve the platform wheel bundled into a packaged app. A build with missing
+ * or unsafe wheel metadata is broken and must fail explicitly;
  * falling back to source would require an end-user Rust toolchain.
  */
 export function resolvePreReleaseBackendWheelPath(): string | null {
-    const metadata = readPreReleaseMetadata();
+    const metadata = readBundledBackendMetadata();
     if (!metadata) {
         return null;
     }
@@ -158,16 +181,16 @@ export function resolvePreReleaseBackendWheelPath(): string | null {
         typeof expectedSha256 !== 'string' ||
         !/^[a-f0-9]{64}$/i.test(expectedSha256)
     ) {
-        throw new Error('Prerelease metadata does not contain a valid backend wheel artifact.');
+        throw new Error('Bundled backend metadata does not contain a valid wheel artifact.');
     }
 
     const wheelPath = path.join(getAssetsDir(), 'python', fileName);
     if (!fs.existsSync(wheelPath)) {
-        throw new Error(`Bundled prerelease backend wheel is missing: ${wheelPath}`);
+        throw new Error(`Bundled backend wheel is missing: ${wheelPath}`);
     }
     const actualSha256 = crypto.createHash('sha256').update(fs.readFileSync(wheelPath)).digest('hex');
     if (actualSha256.toLowerCase() !== expectedSha256.toLowerCase()) {
-        throw new Error(`Bundled prerelease backend wheel failed its integrity check: ${wheelPath}`);
+        throw new Error(`Bundled backend wheel failed its integrity check: ${wheelPath}`);
     }
     return wheelPath;
 }

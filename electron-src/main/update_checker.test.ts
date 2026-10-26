@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
     isDev: false,
+    bundledWheelPath: null as string | null,
     readFileSync: vi.fn(),
     execFileSync: vi.fn(),
     fetch: vi.fn(),
@@ -12,7 +13,10 @@ vi.mock('child_process', () => ({ execFileSync: mocks.execFileSync }));
 vi.mock('electron-log', () => ({ default: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
 vi.mock('./store.js', () => ({ getPythonPath: () => 'managed-python' }));
 vi.mock('./services/python_ops.js', () => ({ getProjectPath: () => '/gsm-project' }));
-vi.mock('./util.js', () => ({ get isDev() { return mocks.isDev; } }));
+vi.mock('./util.js', () => ({
+    get isDev() { return mocks.isDev; },
+    resolvePreReleaseBackendWheelPath: () => mocks.bundledWheelPath,
+}));
 
 import { checkForUpdates } from './update_checker.js';
 
@@ -20,6 +24,7 @@ describe('backend update source selection', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         mocks.isDev = false;
+        mocks.bundledWheelPath = null;
         mocks.readFileSync.mockReturnValue('[project]\nversion = "2026.10.0"\n');
         mocks.fetch.mockResolvedValue({
             ok: true,
@@ -59,6 +64,17 @@ describe('backend update source selection', () => {
             });
         }
 
+        expect(mocks.fetch).not.toHaveBeenCalled();
+        expect(mocks.execFileSync).not.toHaveBeenCalled();
+    });
+
+    it('uses the bundled backend wheel without querying PyPI in packaged releases', async () => {
+        mocks.bundledWheelPath = '/gsm/resources/assets/python/gamesentenceminer-custom.whl';
+
+        await expect(checkForUpdates(false, '2026.10.0')).resolves.toEqual({
+            updateAvailable: false,
+            latestVersion: '2026.10.0',
+        });
         expect(mocks.fetch).not.toHaveBeenCalled();
         expect(mocks.execFileSync).not.toHaveBeenCalled();
     });

@@ -423,13 +423,13 @@ function getNextReleaseVersion(version: string): string | null {
 /**
  * Specifier for installing the GSM backend package.
  *
- * Pre-release builds install the platform-specific wheel bundled with the
+ * Current packaged builds install the platform-specific wheel bundled with the
  * Electron app. CI builds that wheel from the same commit and version as the
- * app, so beta users do not need Git or a Rust compiler and cannot drift to a
- * newer branch head after the app artifact was produced.
+ * app, so users do not need Git or a Rust compiler and cannot drift away from
+ * the source used to produce the app artifact.
  *
- * For stable production releases we install from PyPI within the compatible
- * release window. For example, a client bundling 2026.7.4 installs
+ * Older stable builds without wheel metadata install from PyPI within the
+ * compatible release window. For example, a client bundling 2026.7.4 installs
  * `GameSentenceMiner>=2026.7.4,<2026.7.5`, allowing 2026.7.4.postN hotfixes
  * without allowing the backend for a newer Electron client. Dependencies remain
  * locked by the bundled uv.lock (see {@link syncLockedEnvironment}).
@@ -443,9 +443,9 @@ export function getBundledBackendSpecifier(): string {
         return getProjectPath();
     }
 
-    const preReleaseWheelPath = resolvePreReleaseBackendWheelPath();
-    if (preReleaseWheelPath) {
-        return preReleaseWheelPath;
+    const bundledWheelPath = resolvePreReleaseBackendWheelPath();
+    if (bundledWheelPath) {
+        return bundledWheelPath;
     }
 
     const version = getBundledBackendVersion();
