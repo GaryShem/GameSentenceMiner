@@ -35,7 +35,7 @@ jobs:
       - name: Compute next custom version
         id: version
         run: |
-          VERSION=$(node scripts/compute-version.cjs --local --local-id fwiffo.custom)
+          VERSION=$(node scripts/compute-version.cjs --pre-release --preid fwiffo-custom)
           echo "Computed custom version: $VERSION"
           echo "PACKAGE_VERSION=$VERSION" >> "$GITHUB_OUTPUT"
 

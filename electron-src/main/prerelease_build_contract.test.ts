@@ -36,6 +36,18 @@ describe('prerelease build contract', () => {
         expect(workflow.match(/electron-src\/assets\/python\/\*\.whl/g)).toHaveLength(3);
     });
 
+    it('uses an incrementing SemVer prerelease that npm preserves', () => {
+        const workflow = fs.readFileSync(
+            path.join(process.cwd(), '.github', 'workflows', 'dev_release_exe.yml'),
+            'utf8'
+        );
+
+        expect(workflow).toContain(
+            'compute-version.cjs --pre-release --preid fwiffo-custom'
+        );
+        expect(workflow).not.toContain('--local --local-id fwiffo.custom');
+    });
+
     it('builds and bundles the checked-out backend for every stable release platform', () => {
         const workflow = fs.readFileSync(
             path.join(process.cwd(), '.github', 'workflows', 'release_exe.yml'),

@@ -18,3 +18,10 @@ test("resolveProjectVersion does not preserve invalid post-release numbers", () 
   assert.equal(resolveProjectVersion("2026.8.2", "2026.8.2.post0"), "2026.8.2");
   assert.equal(resolveProjectVersion("2026.8.2", "2026.8.2.post01"), "2026.8.2");
 });
+
+test("resolveProjectVersion gives custom prerelease wheels a unique PEP 440 version", () => {
+  assert.equal(
+    resolveProjectVersion("2026.9.3-fwiffo-custom.11", "2026.10.0"),
+    "2026.9.3+fwiffo.custom.11",
+  );
+});
