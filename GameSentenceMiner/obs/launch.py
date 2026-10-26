@@ -48,11 +48,23 @@ def get_queued_gui_errors():
 # ---------------------------------------------------------------------------
 # Video source constants & utilities
 # ---------------------------------------------------------------------------
-VIDEO_SOURCE_KINDS = {"window_capture", "game_capture", "monitor_capture"}
+VIDEO_SOURCE_KINDS = {
+    "window_capture",
+    "game_capture",
+    "monitor_capture",
+    "xcomposite_input",
+    "pipewire-desktop-capture-source",
+    "pipewire-window-capture-source",
+    "pipewire-screen-capture-source",
+}
 VIDEO_SOURCE_PRIORITY = {
     "game_capture": 0,
     "window_capture": 1,
+    "xcomposite_input": 1,
+    "pipewire-window-capture-source": 1,
     "monitor_capture": 2,
+    "pipewire-desktop-capture-source": 2,
+    "pipewire-screen-capture-source": 2,
 }
 
 

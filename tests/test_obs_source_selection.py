@@ -75,6 +75,14 @@ def test_sort_video_sources_by_preference_falls_back_when_game_capture_inactive(
 
 def test_get_video_scene_items_filters_out_application_audio_sources():
     items = [
+        {
+            "sourceName": "Application Audio Capture (PipeWire)",
+            "inputKind": "pipewire-app-capture-source",
+        },
+        {
+            "sourceName": "Screen Capture (PipeWire)",
+            "inputKind": "pipewire-screen-capture-source",
+        },
         {"sourceName": "Window Source", "inputKind": "window_capture"},
         {
             "sourceName": "Audio Source",
@@ -86,6 +94,7 @@ def test_get_video_scene_items_filters_out_application_audio_sources():
     filtered = obs.get_video_scene_items(items)
 
     assert [item["sourceName"] for item in filtered] == [
+        "Screen Capture (PipeWire)",
         "Window Source",
         "Game Source",
     ]
