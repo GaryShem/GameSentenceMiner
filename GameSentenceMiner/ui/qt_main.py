@@ -368,14 +368,55 @@ class DialogManager(QObject):
     # 4. Screen Cropper
     # =========================================================================
 
-    def _logic_cropper(self, transparent_mode, callback):
-        _get_show_screen_cropper()(on_complete=callback, transparent_mode=transparent_mode)
+    def _logic_cropper(
+        self,
+        transparent_mode,
+        callback,
+        captured_image=None,
+        capture_source="screen_cropper",
+        coordinate_mode="absolute_screen",
+    ):
+        _get_show_screen_cropper()(
+            on_complete=callback,
+            transparent_mode=transparent_mode,
+            captured_image=captured_image,
+            capture_source=capture_source,
+            coordinate_mode=coordinate_mode,
+        )
 
-    async def screen_cropper_async(self, transparent_mode=False):
-        return await self._run_async(lambda cb: self._logic_cropper(transparent_mode, cb))
+    async def screen_cropper_async(
+        self,
+        transparent_mode=False,
+        captured_image=None,
+        capture_source="screen_cropper",
+        coordinate_mode="absolute_screen",
+    ):
+        return await self._run_async(
+            lambda cb: self._logic_cropper(
+                transparent_mode,
+                cb,
+                captured_image,
+                capture_source,
+                coordinate_mode,
+            )
+        )
 
-    def screen_cropper_sync(self, transparent_mode=False):
-        return self._run_sync(lambda cb: self._logic_cropper(transparent_mode, cb))
+    def screen_cropper_sync(
+        self,
+        transparent_mode=False,
+        captured_image=None,
+        capture_source="screen_cropper",
+        coordinate_mode="absolute_screen",
+    ):
+        return self._run_sync(
+            lambda cb: self._logic_cropper(
+                transparent_mode,
+                cb,
+                captured_image,
+                capture_source,
+                coordinate_mode,
+            )
+        )
 
     # =========================================================================
     # 5. Scene Selection (Profile Selection)
@@ -684,7 +725,12 @@ def launch_screenshot_selector(video_path, timestamp, mode="beginning"):
     return get_dialog_manager().screenshot_selector_sync(video_path, timestamp, mode)
 
 
-def launch_screen_cropper(transparent_mode=False):
+def launch_screen_cropper(
+    transparent_mode=False,
+    captured_image=None,
+    capture_source="screen_cropper",
+    coordinate_mode="absolute_screen",
+):
     """
     Launch screen cropper. Thread-safe, blocking.
 
@@ -694,7 +740,12 @@ def launch_screen_cropper(transparent_mode=False):
 
     Returns: PIL.Image or None
     """
-    return get_dialog_manager().screen_cropper_sync(transparent_mode)
+    return get_dialog_manager().screen_cropper_sync(
+        transparent_mode,
+        captured_image,
+        capture_source,
+        coordinate_mode,
+    )
 
 
 def launch_text_input(title, label):

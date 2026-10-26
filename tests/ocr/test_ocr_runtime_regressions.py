@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+import asyncio
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,54 @@ from GameSentenceMiner.ocr.gsm_ocr_config import Monitor, OCRConfig, Rectangle
 from GameSentenceMiner.owocr.owocr import ocr as ocr_module
 from GameSentenceMiner.owocr.owocr.ocr import post_process
 from GameSentenceMiner.owocr.owocr import ocr_runtime as run_module
+
+
+def test_result_delivery_schedules_on_an_existing_asyncio_loop(monkeypatch):
+    sent = []
+
+    async def fake_send_result(text, time, *, response_dict=None, source=None):
+        sent.append((text, time, response_dict, source))
+
+    monkeypatch.setattr(gsm_ocr, "send_result", fake_send_result)
+    timestamp = datetime(2026, 10, 26, 7, 31, tzinfo=timezone.utc)
+
+    async def run_from_ipc_loop():
+        gsm_ocr._dispatch_send_result("recognized", timestamp, response_dict={"ok": True}, source="manual")
+        await asyncio.sleep(0)
+
+    asyncio.run(run_from_ipc_loop())
+
+    assert sent == [("recognized", timestamp, {"ok": True}, "manual")]
+
+
+def test_area_select_uses_obs_frame_instead_of_desktop_capture(monkeypatch):
+    from GameSentenceMiner.ui import qt_main
+
+    obs_frame = Image.new("RGB", (1280, 720), color=(10, 20, 30))
+    cropped = Image.new("RGB", (320, 180), color=(10, 20, 30))
+    cropper_calls = []
+    queued = []
+
+    monkeypatch.setattr(gsm_ocr, "obs_ocr", True)
+    monkeypatch.setattr(gsm_ocr.obs, "get_screenshot_PIL", lambda **kwargs: obs_frame)
+    monkeypatch.setattr(
+        qt_main,
+        "launch_screen_cropper",
+        lambda **kwargs: cropper_calls.append(kwargs) or cropped,
+    )
+    monkeypatch.setattr(gsm_ocr, "_put_latest_second_ocr_task", queued.append)
+    monkeypatch.setattr(gsm_ocr, "get_ocr_language", lambda: "ja")
+
+    assert gsm_ocr.run_area_select_ocr_once() is True
+    assert cropper_calls == [
+        {
+            "transparent_mode": False,
+            "captured_image": obs_frame,
+            "capture_source": "area_select_obs",
+            "coordinate_mode": "source_content",
+        }
+    ]
+    assert queued and queued[0][2] is cropped
 
 
 def test_set_ocr_engines_releases_inactive_instances(monkeypatch):

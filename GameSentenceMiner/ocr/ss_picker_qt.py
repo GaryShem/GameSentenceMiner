@@ -146,6 +146,10 @@ class ScreenCropperWidget(QWidget):
         on_complete=None,
         transparent_mode=False,
         dpi_scale=1.0,
+        display_left=None,
+        display_top=None,
+        capture_source="screen_cropper",
+        coordinate_mode="absolute_screen",
     ):
         """
         Resets the widget state for a new capture session.
@@ -165,6 +169,8 @@ class ScreenCropperWidget(QWidget):
         self.transparent_mode = transparent_mode
         self.result = None
         self.physical_to_logical_scale = dpi_scale
+        self.capture_source = capture_source
+        self.coordinate_mode = coordinate_mode
 
         # Reset drawing state
         self.start_pos = None
@@ -199,7 +205,10 @@ class ScreenCropperWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, self.transparent_mode)
 
         # Set widget geometry using logical coordinates
-        self.move(logical_left, logical_top)
+        self.move(
+            logical_left if display_left is None else int(display_left),
+            logical_top if display_top is None else int(display_top),
+        )
         self.resize(logical_width, logical_height)
 
         logger.info(
@@ -235,6 +244,8 @@ class ScreenCropperWidget(QWidget):
             "selection_width": int(selection_width),
             "selection_height": int(selection_height),
             "transparent_mode": bool(self.transparent_mode),
+            "capture_source": self.capture_source,
+            "coordinate_mode": self.coordinate_mode,
         }
         try:
             setattr(image, "_gsm_screen_crop_metadata", metadata)
@@ -509,7 +520,13 @@ class ScreenCropperWidget(QWidget):
             self._input_grabbed = False
 
 
-def show_screen_cropper(on_complete=None, transparent_mode=False):
+def show_screen_cropper(
+    on_complete=None,
+    transparent_mode=False,
+    captured_image=None,
+    capture_source="screen_cropper",
+    coordinate_mode="absolute_screen",
+):
     """
     Displays a Qt-based screen cropper that allows the user to select a region.
     Reuses the existing widget instance.
@@ -517,10 +534,48 @@ def show_screen_cropper(on_complete=None, transparent_mode=False):
     """
     global _screen_cropper_instance
 
+    # Callers route this function to the Qt thread before entering here.
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+
     # Get DPI scaling information for all monitors
     monitors_dpi = get_monitor_dpi_scale()
+    display_left = None
+    display_top = None
 
-    if not transparent_mode:
+    if captured_image is not None:
+        # Wayland commonly blocks X11 GetImage, while OBS already has the game
+        # frame through PipeWire. Use that frame as the frozen crop surface.
+        if captured_image.mode != "RGB":
+            captured_image = captured_image.convert("RGB")
+        screen = app.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+        available_width = max(1, available.width()) if available is not None else captured_image.width
+        available_height = max(1, available.height()) if available is not None else captured_image.height
+        dpi_scale = max(
+            1.0,
+            captured_image.width / available_width,
+            captured_image.height / available_height,
+        )
+        logical_width = int(captured_image.width / dpi_scale)
+        logical_height = int(captured_image.height / dpi_scale)
+        if available is not None:
+            display_left = available.left() + max(0, (available.width() - logical_width) // 2)
+            display_top = available.top() + max(0, (available.height() - logical_height) // 2)
+        monitor_geometry = {
+            "left": 0,
+            "top": 0,
+            "width": captured_image.width,
+            "height": captured_image.height,
+        }
+        main_monitor = dict(monitor_geometry)
+        transparent_mode = False
+        logger.info(
+            f"Using supplied capture for screen cropper: {captured_image.width}x{captured_image.height}, "
+            f"display scale: {dpi_scale:.2f}"
+        )
+    elif not transparent_mode:
         # Original mode: capture screen first
         try:
             # Capture all monitors - optimized for speed
@@ -582,11 +637,6 @@ def show_screen_cropper(on_complete=None, transparent_mode=False):
                 on_complete(None)
             return
 
-    # Create QApplication if it doesn't exist
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(sys.argv)
-
     # Create Singleton if needed
     if _screen_cropper_instance is None:
         _screen_cropper_instance = ScreenCropperWidget()
@@ -599,6 +649,10 @@ def show_screen_cropper(on_complete=None, transparent_mode=False):
         on_complete,
         transparent_mode,
         dpi_scale,
+        display_left,
+        display_top,
+        capture_source,
+        coordinate_mode,
     )
 
     # Keep the widget alive by entering event loop until it's hidden

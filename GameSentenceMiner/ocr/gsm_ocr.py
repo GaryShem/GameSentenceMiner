@@ -3021,16 +3021,18 @@ def get_screen_crop_image_metadata(image: Any) -> dict[str, Any] | None:
     selection_top = _safe_int(raw_meta.get("selection_top"), virtual_top)
     selection_width = _safe_int(raw_meta.get("selection_width"), 0)
     selection_height = _safe_int(raw_meta.get("selection_height"), 0)
+    capture_source = str(raw_meta.get("capture_source") or "screen_cropper")
+    coordinate_mode = str(raw_meta.get("coordinate_mode") or "absolute_screen")
 
     if virtual_width <= 0 or virtual_height <= 0:
         return None
 
     return {
-        "capture_source": "screen_cropper",
+        "capture_source": capture_source,
         "capture_original_size": {"width": virtual_width, "height": virtual_height},
         "capture_scaled_size": {"width": virtual_width, "height": virtual_height},
         "capture_origin": {"x": virtual_left, "y": virtual_top},
-        "coordinate_mode": "absolute_screen",
+        "coordinate_mode": coordinate_mode,
         "ocr_area_crop_offset": {
             "x": max(0, selection_left - virtual_left),
             "y": max(0, selection_top - virtual_top),
@@ -3352,7 +3354,7 @@ class OCRProcessor:
                 source=source,
                 response_dict=final_payload,
             )
-            asyncio.run(send_result(text, time, response_dict=final_payload, source=source))
+            _dispatch_send_result(text, time, response_dict=final_payload, source=source)
             emit_ocr_debug(
                 debug_enabled,
                 "delivery.sent",
@@ -3466,6 +3468,16 @@ async def send_result(text, time, response_dict=None, source=TextSource.OCR):
             ocr_ipc.announce_ocr_result(text, metadata)
         except Exception as e:
             logger.debug(f"Error sending OCR result over IPC: {e}")
+
+
+def _dispatch_send_result(text, time, response_dict=None, source=TextSource.OCR):
+    """Deliver a result from either a worker thread or the async IPC loop."""
+    coroutine = send_result(text, time, response_dict=response_dict, source=source)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+    return loop.create_task(coroutine)
 
 
 TEXT_APPEARENCE_DELAY = get_ocr_scan_rate() * 1000 + 500  # Adjust as needed
@@ -3585,7 +3597,7 @@ def _send_result_callback(text, time, *, response_dict=None, source=None):
             response_dict=response_dict,
         )
         _last_metrics_img = None
-    asyncio.run(send_result(text, time, response_dict=response_dict, source=line_source))
+    _dispatch_send_result(text, time, response_dict=response_dict, source=line_source)
 
 
 def _run_second_ocr_callback(img, last_result, filtering, engine, **kw):
@@ -4258,7 +4270,30 @@ def run_area_select_ocr_once(source=TextSource.SCREEN_CROPPER) -> bool:
 
     logger.info("Running Area-Select OCR via screen cropper...")
     capture_time = datetime.now()
-    cropped_img = launch_screen_cropper(transparent_mode=False)
+    obs_frame = None
+    if obs_ocr:
+        try:
+            obs_frame = obs.get_screenshot_PIL(
+                compression=90,
+                img_format="jpg",
+                capture_fps=get_ocr_wgc_capture_fps(),
+            )
+        except Exception as e:
+            logger.debug(f"Could not prepare OBS frame for Area-Select OCR: {e}")
+
+    try:
+        if obs_frame is not None:
+            cropped_img = launch_screen_cropper(
+                transparent_mode=False,
+                captured_image=obs_frame,
+                capture_source="area_select_obs",
+                coordinate_mode="source_content",
+            )
+        else:
+            cropped_img = launch_screen_cropper(transparent_mode=False)
+    finally:
+        if obs_frame is not None:
+            obs_frame.close()
 
     if not cropped_img:
         logger.info("Screen cropper cancelled")
