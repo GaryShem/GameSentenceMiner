@@ -67,11 +67,11 @@ describe('prerelease build contract', () => {
             'utf8'
         );
 
-        expect(workflow).toContain('CIBW_BUILD: cp310-manylinux_x86_64');
+        expect(workflow).toContain('CIBW_BUILD: cp311-manylinux_x86_64');
         expect(workflow).toContain('CIBW_REPAIR_WHEEL_COMMAND_LINUX: ""');
-        expect(workflow).toContain('CIBW_BUILD: cp310-macosx_arm64');
+        expect(workflow).toContain('CIBW_BUILD: cp311-macosx_arm64');
         expect(workflow).toContain('CIBW_REPAIR_WHEEL_COMMAND_MACOS: ""');
-        expect(workflow.match(/CIBW_BUILD: cp310-\*/g)).toHaveLength(1);
+        expect(workflow.match(/CIBW_BUILD: cp311-\*/g)).toHaveLength(1);
     });
 
     it('keeps retired PyPI and per-platform release workflows absent', () => {

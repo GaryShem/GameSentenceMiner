@@ -7,9 +7,10 @@
   "scripts": {
     "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
     "dev:renderer": "vite --host 127.0.0.1 --port 5174 --strictPort",
-    "dev:electron": "wait-on tcp:5174 && cross-env GSM_OVERLAY_DEV_SERVER_URL=http://127.0.0.1:5174 nodemon --exitcrash --watch main.js --watch preload.js --watch background.js --watch backend_connector.js --watch magpie.js --watch window.js --watch gamepad.js --ext js,cjs,mjs --exec \"node scripts/electron-dev-once.cjs\"",
+    "dev:electron": "wait-on tcp:5174 && cross-env GSM_OVERLAY_DEV_SERVER_URL=http://127.0.0.1:5174 nodemon --exitcrash --watch main.js --watch preload.js --watch background.js --watch backend_connector.js --watch magpie.js --watch magpie_native.js --watch magpie_session.js --watch magpie_hit_test.js --watch text_hover.js --watch window.js --watch gamepad.js --ext js,cjs,mjs --exec \"node scripts/electron-dev-once.cjs\"",
     "start": "electron-forge start",
     "test": "node --test tests/*.test.cjs",
+    "test:magpie-electron": "node tests/run-magpie-native-electron.cjs",
     "test:render-electron": "node tests/run-overlay-render-electron.cjs",
     "test:vn-guide-electron": "node tests/run-vn-guide-electron.cjs",
     "test:jiten-electron": "node tests/run-jiten-electron-smoke.cjs",
@@ -28,19 +29,19 @@
     "node": ">=22.22.2"
   },
   "devDependencies": {
-    "@electron-forge/cli": "^7.11.2",
-    "@electron-forge/maker-deb": "^7.11.2",
-    "@electron-forge/maker-rpm": "^7.11.2",
-    "@electron-forge/maker-squirrel": "^7.11.2",
-    "@electron-forge/maker-zip": "^7.11.2",
-    "@electron-forge/plugin-auto-unpack-natives": "^7.11.2",
-    "@electron-forge/plugin-fuses": "^7.11.2",
-    "@electron/fuses": "^1.8.0",
-    "concurrently": "^10.0.4",
+    "@electron-forge/cli": "^8.0.1",
+    "@electron-forge/maker-deb": "^8.0.1",
+    "@electron-forge/maker-rpm": "^8.0.1",
+    "@electron-forge/maker-squirrel": "^8.0.1",
+    "@electron-forge/maker-zip": "^8.0.1",
+    "@electron-forge/plugin-auto-unpack-natives": "^8.0.1",
+    "@electron-forge/plugin-fuses": "^8.0.1",
+    "@electron/fuses": "^2.1.3",
+    "concurrently": "^10.0.6",
     "cross-env": "^10.1.0",
-    "electron": "^43.2.0",
+    "electron": "^43.8.1",
     "nodemon": "^3.1.14",
-    "vite": "^8.1.5",
+    "vite": "^8.2.4",
     "wait-on": "^9.1.0"
   },
   "dependencies": {
@@ -51,7 +52,7 @@
   },
   "overrides": {
     "@electron/rebuild": "^4.0.4",
-    "tmp": "^0.2.5",
+    "tmp": "^0.2.6",
     "@tootallnate/once": "^3.0.1"
   }
 }

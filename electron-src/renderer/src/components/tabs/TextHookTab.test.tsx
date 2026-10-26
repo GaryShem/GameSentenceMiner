@@ -6,8 +6,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TextHookTab } from "./TextHookTab";
+import { I18nProvider } from "../../i18n";
 
 const invokeMock = vi.fn();
+const writeTextMock = vi.fn();
 
 async function flushAsyncWork() {
   await Promise.resolve();
@@ -24,6 +26,7 @@ describe("TextHookTab", () => {
     (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.useFakeTimers();
     invokeMock.mockReset();
+    writeTextMock.mockReset();
     ipcListeners = new Map();
 
     invokeMock.mockImplementation(async (channel: string) => {
@@ -82,6 +85,11 @@ describe("TextHookTab", () => {
       },
     });
 
+    Object.defineProperty(window, "clipboard", {
+      configurable: true,
+      value: { writeText: writeTextMock },
+    });
+
     Object.defineProperty(window, "gsmEnv", {
       configurable: true,
       value: {
@@ -115,6 +123,66 @@ describe("TextHookTab", () => {
     expect(container.textContent).toContain("Visible hook text");
     expect(container.textContent).not.toContain("Hook #5");
     expect(container.textContent).not.toContain("(no text yet)");
+  });
+
+  it.each(["inactive tab", "hidden window"])("buffers hook output without rendering in an %s", async (hiddenMode) => {
+    await act(async () => {
+      root.render(<TextHookTab active />);
+      await flushAsyncWork();
+    });
+    await act(async () => {
+      if (hiddenMode === "hidden window") {
+        Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+        document.dispatchEvent(new Event("visibilitychange"));
+      } else root.render(<TextHookTab active={false} />);
+    });
+    const before = container.innerHTML;
+    try {
+      await act(async () => {
+        ipcListeners.get("texthook.hooks")?.({}, {
+          selectedHookId: null,
+          hooks: [{ id: "9", function: "Hook #9", preview: "Buffered preview", samples: [] }],
+        });
+        for (let i = 0; i < 305; i++) {
+          ipcListeners.get("texthook.text")?.({}, { text: `Buffered dialogue ${i}`, hookId: "9", ts: i });
+          ipcListeners.get("texthook.log")?.({}, { message: `Buffered log ${i}`, ts: i });
+        }
+      });
+      expect(container.innerHTML === before).toBe(true);
+    } finally {
+      await act(async () => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+        document.dispatchEvent(new Event("visibilitychange"));
+        root.render(<TextHookTab active />);
+        await flushAsyncWork();
+      });
+    }
+    expect(container.querySelectorAll(".texthook-output-line")).toHaveLength(20);
+    expect(container.querySelector(".texthook-output-line")?.textContent).toContain("Buffered dialogue 285");
+    expect(container.textContent).toContain("Buffered dialogue 304");
+    expect(container.querySelectorAll(".texthook-log-line")).toHaveLength(50);
+    expect(container.textContent).toContain("Buffered log 304");
+  });
+
+  it("preserves retained output and log rows when their histories fill up", async () => {
+    await act(async () => {
+      root.render(<TextHookTab active />);
+      await flushAsyncWork();
+    });
+    await act(async () => {
+      for (let i = 0; i < 300; i++) {
+        ipcListeners.get("texthook.text")?.({}, { text: `Dialogue ${i}`, hookId: "9", ts: i });
+        ipcListeners.get("texthook.log")?.({}, { message: `Log ${i}`, ts: i });
+      }
+    });
+    const retainedTextRow = container.querySelectorAll(".texthook-output-line")[1];
+    const retainedLogRow = container.querySelectorAll(".texthook-log-line")[1];
+    await act(async () => {
+      ipcListeners.get("texthook.text")?.({}, { text: "Next dialogue", hookId: "9", ts: 300 });
+      ipcListeners.get("texthook.log")?.({}, { message: "Next log", ts: 300 });
+    });
+    expect(container.querySelector(".texthook-output-line")).toBe(retainedTextRow);
+    expect(container.querySelector(".texthook-log-line")).toBe(retainedLogRow);
   });
 
   it.each(["luna", "textractor"])("ranks %s hooks and lets users reveal and select likely noise", async (engine) => {
@@ -732,6 +800,43 @@ describe("TextHookTab", () => {
       "Fixture Game OneFixture details one",
       "Fixture Engine TwoFixture details two",
     ]);
+  });
+
+  it.each([
+    ["en", "Copy line"],
+    ["ja", "行をコピー"],
+    ["ukr", "Копіювати рядок"],
+    ["zh", "复制此行"],
+    ["ko", "줄 복사"],
+    ["es", "Copiar línea"],
+  ])("copies only the chosen output entry with its original line breaks in %s", async (locale, label) => {
+    await act(async () => {
+      root.render(<I18nProvider initialLocale={locale}><TextHookTab active /></I18nProvider>);
+      await flushAsyncWork();
+    });
+    expect(container.querySelectorAll(".texthook-output button")).toHaveLength(0);
+
+    const texts = ["  最初の行\n次の行  ", "<b>Second capture & text</b>"];
+    await act(async () => {
+      for (const text of texts) {
+        ipcListeners.get("texthook.text")?.({}, { hookId: "9", text });
+      }
+    });
+
+    const entries = container.querySelectorAll(".texthook-output-line");
+    expect(entries).toHaveLength(2);
+    expect(writeTextMock).not.toHaveBeenCalled();
+    for (const index of [1, 0]) {
+      const button = entries[index].querySelector<HTMLButtonElement>("button")!;
+      expect(button).not.toBeNull();
+      expect(button.getAttribute("aria-label")).toBe(label);
+      expect(button.title).toBe(label);
+      await act(async () => { button.click(); });
+      expect(writeTextMock).toHaveBeenLastCalledWith(texts[index]);
+    }
+    expect(writeTextMock).toHaveBeenCalledTimes(2);
+    expect(container.querySelectorAll(".texthook-output-line")).toHaveLength(2);
+    expect(invokeMock).not.toHaveBeenCalledWith("texthook.setCopyToClipboard", expect.anything());
   });
 
   it("caps displayed hook text and blocks excessive Japanese quote pairs", async () => {

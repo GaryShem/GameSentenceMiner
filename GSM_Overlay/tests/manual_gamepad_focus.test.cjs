@@ -50,11 +50,12 @@ function setup(t, settings = {}) {
     webContents: { focus() {}, send: (...args) => rendererMessages.push(args) },
   };
   const context = vm.createContext({
-    console: { log() {} }, Date, setTimeout, clearTimeout, ipcMain, mainWindow,
+    console: { log() {}, warn() {} }, Date, setTimeout, clearTimeout, ipcMain, mainWindow,
     userSettings: {
       manualMode: true, manualModeType: 'toggle',
       manualModeInactiveBehavior: 'disable-interaction',
       manualModeDisableInteractionFocusOverlay: true,
+      textHoverClickThrough: JSON.parse(source.match(/"textHoverClickThrough": (true|false)/)[1]),
       focusOverlayOnYomitanLookup: false, ...settings,
     },
     MANUAL_MODE_INACTIVE_BEHAVIOR_HIDE_OVERLAY: 'hide-overlay',
@@ -67,17 +68,17 @@ function setup(t, settings = {}) {
     OVERLAY_TOPMOST_REASSERT_THROTTLE_MS: 1500,
     lastFocusRestoreRequestAt: 0, suppressBackendFocusRestoreUntil: 0,
     overlayFocusRequestVersion: 0,
-    pendingMagpieFocusRestore: null,
+    pendingMagpieFocusRestore: null, magpieFocusRequestSequence: 0, magpieSession: null, magpieSourceFocused: false,
     lastOverlayTopmostReassertAt: 0, pendingOverlayTopmostReassertTimer: null,
     manualHotkeyPressed: false, manualModeToggleState: false,
-    gamepadNavigationActive: false, gamepadReleaseRecoveryVersion: 0,
+    gamepadNavigationActive: false,
     overlayCaptureAvailable: true, trackedGameWindowState: 'active', isTexthookerMode: false,
     customPageController: null, vnGuideController: null, vnGuideHud: null,
-    trackedGameWindowStateUpdatedAt: 0, magpieYomitanCloseVisibilityGuardActive: false,
+    trackedGameWindowStateUpdatedAt: 0,
     isOverlayVisible: false, resizeMode: false, yomitanShown: false,
-    yomitanForegroundActive: false, yomitanRecoveryVersion: 0, lastYomitanEventAt: 0,
+    yomitanForegroundActive: false, yomitanRecoveryVersion: 0,
     currentMagpieState: { active: false },
-    backend: { connected: true, send: message => restores.push(message.type) },
+    backend: { connected: true, send: message => { if (message.type === 'restore-focus-request') restores.push(message.type); } },
     isWindows: () => true, isLinux: () => false, isMac: () => false,
     normalizeManualModeType: value => value,
     createManualHotkeyController, MANUAL_HOTKEY_ELECTRON_RELEASE_TIMEOUT_MS: 650,
@@ -87,8 +88,7 @@ function setup(t, settings = {}) {
     sendOverlayPauseRequest: (action, source) => { pauseRequests.push([action, source]); return true; },
     requestOverlayScanForActivation() {}, clearGamepadManualPause() {},
     requestManualModeBackground() {}, getManualModeBackgroundMode: () => 'off',
-    resetActivityTimer() {}, clearMagpieYomitanCloseVisibilityGuard() {},
-    beginMagpieYomitanCloseVisibilityGuard() {},
+    resetActivityTimer() {},
     normalizeTrackedGameWindowState: value => value,
     createMagpieState: () => ({ active: false }),
     revealAutomaticOverlayForSignal() {},
@@ -103,6 +103,8 @@ function setup(t, settings = {}) {
   });
   const functions = [
     'hasValidOverlayCapture', 'canUseOverlayCapture', 'publishOverlayCaptureAvailability',
+    'canTrackMagpiePointer', 'canRouteTextHover',
+    'attachMagpieSession',
     'setTrackedGameWindowState',
     'requestOverlayPauseForSource', 'requestOverlayResumeForSource',
     'isManualMode', 'normalizeManualModeInactiveBehavior',
@@ -112,10 +114,10 @@ function setup(t, settings = {}) {
     'releaseOverlayFocusAfterTopmostRecovery', 'reassertOverlayTopmostWithoutFocus',
     'requestOverlayTopmostReassert', 'showOverlayWithoutFocusForManualVisibleMode',
     'aggressivelyShowOverlayAndReturnFocus', 'setGamepadNavigationModeActive',
-    'restoreAutomaticOverlayPassThrough', 'scheduleGamepadReleaseRecovery',
+    'restoreAutomaticOverlayPassThrough', 'requestMagpieStateRefresh', 'shouldDeferObscuredStateForMagpieFocus', 'handleMagpieFocusResult', 'cancelPendingMagpieFocusRestore', 'requestMagpieFocusRestore',
     'showOverlayUsingManualFlow', 'hideOverlayUsingManualFlow', 'clearManualActivationState',
     'shouldReassertOverlayAroundYomitan', 'shouldPreserveOverlayFocusForYomitan',
-    'requestYomitanOverlayTopmostReassert',
+    'requestYomitanOverlayTopmostReassert', 'scheduleYomitanCloseRecovery',
     'registerTexthookerHotkey', 'deactivateTexthookerMode',
   ].map(name => {
     const match = source.match(new RegExp(`^function ${name}\\([\\s\\S]*?^}`, 'm'));
@@ -130,6 +132,7 @@ function setup(t, settings = {}) {
     between(source, 'const GAMEPAD_FOCUS_RETRY_DELAYS_MS', 'let gamepadToggleRequestSeq'),
     between(source, '  ipcMain.on("gamepad-navigation-state"', '  // Curated keys'),
     between(source, '  ipcMain.on("yomitan-event"', "  ipcMain.on('release-mouse'"),
+    between(source, "  ipcMain.on('magpie-pointer-hit'", '  ipcMain.on("hide",'),
     between(source, '  ipcMain.on("window-state-changed"', '  ipcMain.on("open-settings"'),
     between(source, "  texthookerWindow.on('closed'", "  texthookerWindow.on('show'"),
   ].join('\n'), context);
@@ -290,6 +293,57 @@ test('controller activation keeps focus through both activation messages and loo
   assert.equal(rendererMessages.filter(([channel]) => channel === 'show-overlay-hotkey').length, 1);
 });
 
+test('automatic dictionary lookup defaults to text click-through and permits only current renderer hover controls', t => {
+  const { context, state, send, rendererMessages } = setup(t, { manualMode: false });
+  state.ignoreMouseEvents = true;
+  state.focused = false;
+  send('yomitan-event', true);
+  assert.equal(state.ignoreMouseEvents, true, 'opening a popup must not capture the whole overlay');
+  assert.equal(state.focused, false);
+  assert.ok(rendererMessages.some(([channel]) => channel === 'text-hover-refresh'));
+  send('set-ignore-mouse-events', false);
+  assert.equal(state.ignoreMouseEvents, true, 'legacy text enter cannot acquire mouse input');
+  send('text-hover-ignore', false);
+  assert.equal(state.ignoreMouseEvents, true, 'messages from another sender cannot acquire input');
+  const hover = ignore => context.ipcMain.emit('text-hover-ignore', {sender: context.mainWindow.webContents}, ignore);
+  hover(false);
+  assert.equal(state.ignoreMouseEvents, false, 'popup and control regions remain interactive');
+  hover(true);
+  assert.equal(state.ignoreMouseEvents, true, 'returning to text releases input while the popup stays open');
+  state.visible = false;
+  hover(false);
+  assert.equal(state.ignoreMouseEvents, true, 'a queued result cannot acquire input after hiding');
+  state.visible = true;
+  context.magpieSession = { ownsPointer: () => true };
+  hover(false);
+  assert.equal(state.ignoreMouseEvents, true, 'native Magpie sequence owns projected hit results');
+});
+
+test('automatic hover replies never override explicit manual, controller, resize or dictionary focus', t => {
+  const { context, state } = setup(t, { manualMode: false, textHoverClickThrough: true });
+  for (const owner of ['manualHotkeyPressed', 'manualModeToggleState', 'gamepadNavigationActive', 'resizeMode', 'yomitanForegroundActive']) {
+    context[owner] = true;
+    state.ignoreMouseEvents = false;
+    context.ipcMain.emit('text-hover-ignore', {sender: context.mainWindow.webContents}, true);
+    assert.equal(state.ignoreMouseEvents, false, owner);
+    context[owner] = false;
+  }
+});
+
+test('text click-through can be disabled while Magpie tracking stays available', t => {
+  const { context, state, send } = setup(t, { manualMode: false, textHoverClickThrough: false });
+  assert.equal(context.canRouteTextHover(), true);
+  assert.equal(context.canTrackMagpiePointer(), true);
+  context.ipcMain.emit('text-hover-ignore', { sender: context.mainWindow.webContents }, false, false);
+  assert.equal(state.ignoreMouseEvents, false, 'text can acquire input with the setting off');
+  context.ipcMain.emit('text-hover-ignore', { sender: context.mainWindow.webContents }, true);
+  assert.equal(state.ignoreMouseEvents, false, 'late click-through replies cannot override the setting');
+  send('set-ignore-mouse-events', true);
+  assert.equal(state.ignoreMouseEvents, false, 'legacy mouse-down release cannot break text selection');
+  send('yomitan-event', true);
+  assert.equal(state.ignoreMouseEvents, false, 'the legacy popup interaction still captures input');
+});
+
 test('controller activation honors focus-on-activate without a separate gamepad focus request', t => {
   const { activate, state, restores } = setup(t);
   activate(false);
@@ -343,22 +397,103 @@ for (const exitMode of ['automatic-gamepad', 'manual-gamepad', 'manual-hotkey'])
   });
 }
 
-test('Magpie focus release falls back once if the targeted handoff leaves the overlay focused', t => {
+test('Magpie waits for the backend result before falling back', t => {
   const { activate, deactivate, context, state, restores } = setup(t, { manualMode: false });
   context.currentMagpieState = { active: true };
   activate();
   t.mock.timers.tick(1000);
   deactivate();
-  t.mock.timers.tick(120);
-  t.mock.timers.tick(120);
+  t.mock.timers.tick(1000);
   assert.equal(state.focused, true);
-  assert.deepEqual(restores, ['restore-focus-request'], 'topmost recovery must share the pending handoff');
-  t.mock.timers.tick(10);
-  assert.equal(state.focused, false);
+  assert.equal(state.blurCalls, 0);
+  assert.deepEqual(restores, ['restore-focus-request']);
+  context.handleMagpieFocusResult({ request_id: context.pendingMagpieFocusRestore.requestId, success: false });
   assert.equal(state.blurCalls, 1);
   assert.deepEqual(restores, ['restore-focus-request', 'restore-focus-request']);
-  t.mock.timers.tick(1000);
-  assert.equal(state.blurCalls, 1);
+});
+
+test('a stale obscured snapshot cannot hide the verified foreground Magpie source', t => {
+  const { context, state, send } = setup(t, { manualMode: false });
+  context.magpieSession = { updateTarget() {
+    context.currentMagpieState = { active: true };
+    context.magpieSourceFocused = true;
+  } };
+  send('window-state-changed', { state: 'obscured', targetHwnd: 42 });
+  assert.equal(context.trackedGameWindowState, 'active');
+  assert.equal(state.visible, true);
+});
+
+function attachNativeMagpieFixture(f) {
+  let notify, reorder;
+  const info = {
+    source_hwnd: 42, scaling_hwnd: 99, windowed: false, source_focused: true,
+    sourceWindowLeftEdgePosition: 320, sourceWindowTopEdgePosition: 196,
+    sourceWindowRightEdgePosition: 2240, sourceWindowBottomEdgePosition: 1276,
+    magpieWindowLeftEdgePosition: 0, magpieWindowTopEdgePosition: 0,
+    magpieWindowRightEdgePosition: 2560, magpieWindowBottomEdgePosition: 1440,
+  };
+  const order = { covered: false, raises: 0 };
+  f.context.createMagpieState = require('../magpie').createMagpieState;
+  f.context.createMagpieNative = () => ({
+    watch(_win, onMessage, onOrder) { notify = onMessage; reorder = onOrder; return () => {}; },
+    read: target => target === info.source_hwnd ? info : null,
+    isAbove: () => order.covered,
+  });
+  f.context.createMagpieSession = options => require('../magpie_session').createMagpieSession({
+    ...options, setIntervalFn: () => 1, clearIntervalFn() {},
+  });
+  f.context.mainWindow.moveTop = () => { order.covered = false; order.raises++; };
+  f.context.attachMagpieSession();
+  f.context.magpieSession.updateTarget(42);
+  return { info, order, notify: (...args) => notify(...args), reorder: () => reorder?.() };
+}
+
+for (const interaction of ['dictionary', 'controller']) {
+  for (const ackFirst of [false, true]) {
+    test(`overlay survives a late Magpie reorder after ${interaction} exit (ACK first: ${ackFirst})`, t => {
+      const f = setup(t, { manualMode: false });
+      const native = attachNativeMagpieFixture(f);
+      if (interaction === 'dictionary') f.send('yomitan-event', true);
+      else f.activate();
+      f.state.focused = true;
+      native.info.source_focused = false;
+      native.notify(0, 1);
+      if (interaction === 'dictionary') f.send('yomitan-event', false);
+      else f.deactivate();
+      const requestId = f.context.pendingMagpieFocusRestore.requestId;
+      const acknowledge = () => f.context.handleMagpieFocusResult({ request_id: requestId, success: true });
+      f.state.focused = false;
+      native.info.source_focused = true;
+      if (ackFirst) acknowledge();
+      native.notify(1, 99);
+      if (!ackFirst) acknowledge();
+      const raises = native.order.raises;
+      native.order.covered = true;
+      native.reorder();
+      assert.equal(native.order.covered, false, 'the scaler cannot strand the visible overlay underneath it');
+      assert.equal(native.order.raises, raises + 1);
+      native.reorder();
+      assert.equal(native.order.raises, raises + 1, 'an already-correct order requires no further work');
+      assert.equal(f.state.visible, true);
+      assert.equal(f.state.focused, false);
+      assert.equal(f.state.blurCalls, 0);
+      assert.deepEqual(f.restores, ['restore-focus-request']);
+      f.context.magpieSession.dispose();
+    });
+  }
+}
+
+test('Magpie ordering recovery respects a hidden manual overlay and unavailable capture', t => {
+  const f = setup(t, { manualMode: true, manualModeInactiveBehavior: 'hide-overlay' });
+  const native = attachNativeMagpieFixture(f);
+  native.order.covered = true;
+  native.reorder();
+  assert.equal(native.order.raises, 0);
+  f.context.userSettings.manualMode = false;
+  f.context.overlayCaptureAvailable = false;
+  native.reorder();
+  assert.equal(native.order.raises, 0);
+  f.context.magpieSession.dispose();
 });
 
 test('Magpie handoff fallback cannot blur a new manual activation', t => {
@@ -367,7 +502,9 @@ test('Magpie handoff fallback cannot blur a new manual activation', t => {
   activate();
   deactivate();
   t.mock.timers.tick(40);
+  const requestId = context.pendingMagpieFocusRestore.requestId;
   pressManualHotkey();
+  context.handleMagpieFocusResult({ request_id: requestId, success: false });
   t.mock.timers.tick(1000);
   assert.equal(state.focused, true);
   assert.equal(state.blurCalls, 0);
