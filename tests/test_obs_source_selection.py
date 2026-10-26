@@ -696,6 +696,31 @@ def test_get_best_source_for_screenshot_does_not_select_single_source_without_re
     assert best_source is None
 
 
+def test_get_screenshot_pil_falls_back_to_visible_scene_composite(monkeypatch):
+    scene_image = _valid_test_image()
+    capture_calls = []
+
+    monkeypatch.setattr(
+        obs_actions_module,
+        "get_active_video_sources",
+        lambda: [{"sourceName": "Game Source", "inputKind": "game_capture"}],
+    )
+
+    def capture(source_name, *args, **kwargs):
+        capture_calls.append((source_name, kwargs.get("force_obs", False)))
+        return scene_image if source_name == "Game Scene" else None
+
+    monkeypatch.setattr(obs_actions_module, "get_screenshot_PIL_from_source", capture)
+    monkeypatch.setattr(obs_actions_module, "_apply_ocr_preprocessing", lambda img, **_kwargs: img)
+    monkeypatch.setattr(obs_module.gsm_state, "current_game", "Game Scene", raising=False)
+    monkeypatch.setattr(obs_module, "obs_service", None)
+
+    result = obs_module.get_screenshot_PIL()
+
+    assert result is scene_image
+    assert capture_calls == [("Game Source", False), ("Game Scene", True)]
+
+
 def test_obs_service_tick_applies_fit_before_screenshot_probe(monkeypatch):
     service = obs.OBSService.__new__(obs.OBSService)
     service.initialized = True

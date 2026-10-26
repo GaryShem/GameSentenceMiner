@@ -659,6 +659,42 @@ def _apply_ocr_preprocessing(img, preprocess_mode=None, grayscale=False):
     return gray.filter(ImageFilter.UnsharpMask(radius=1.0, percent=120, threshold=2))
 
 
+def _get_scene_composite_screenshot(
+    scene_name,
+    compression,
+    img_format,
+    width,
+    height,
+    retry,
+    preprocess_mode,
+    grayscale,
+):
+    """Capture OBS's rendered scene when its individual inputs cannot be captured."""
+    if not scene_name:
+        return None
+
+    img = get_screenshot_PIL_from_source(
+        scene_name,
+        compression,
+        img_format,
+        width,
+        height,
+        retry,
+        force_obs=True,
+    )
+    if not img:
+        return None
+
+    img = _apply_ocr_preprocessing(img, preprocess_mode=preprocess_mode, grayscale=grayscale)
+    if _should_skip_image_validation(scene_name=scene_name):
+        return img
+    if is_image_empty(img):
+        return None
+
+    logger.debug(f"Using rendered OBS scene composite '{scene_name}' for screenshot capture.")
+    return img
+
+
 def get_best_source_for_screenshot(log_missing_source=True, suppress_errors=False, capture_fps=None):
     kwargs = {
         "return_source_dict": True,
@@ -716,13 +752,27 @@ def get_screenshot_PIL(
         current_sources = get_active_video_sources(_suppress_obs_errors=True)
     else:
         current_sources = get_active_video_sources()
+
+    svc = _obs_pkg.obs_service
+    current_scene_name = getattr(getattr(svc, "state", None), "current_scene", None) or gsm_state.current_game
     if not current_sources:
+        if not return_source_dict:
+            scene_img = _get_scene_composite_screenshot(
+                current_scene_name,
+                compression,
+                img_format,
+                width,
+                height,
+                retry,
+                preprocess_mode,
+                grayscale,
+            )
+            if scene_img is not None:
+                return scene_img
         if log_missing_source:
             logger.error("No active video sources found in the current scene.")
         return None
 
-    svc = _obs_pkg.obs_service
-    current_scene_name = getattr(getattr(svc, "state", None), "current_scene", None) or gsm_state.current_game
     input_active_by_name = getattr(getattr(svc, "state", None), "input_active_by_name", None)
     input_show_by_name = getattr(getattr(svc, "state", None), "input_show_by_name", None)
     helper_sources = [
@@ -779,8 +829,18 @@ def get_screenshot_PIL(
             force_obs=force_obs,
             capture_fps=capture_fps,
         )
-        img = _apply_ocr_preprocessing(img, preprocess_mode=preprocess_mode, grayscale=grayscale)
-        return img
+        if img is not None:
+            return _apply_ocr_preprocessing(img, preprocess_mode=preprocess_mode, grayscale=grayscale)
+        return _get_scene_composite_screenshot(
+            current_scene_name,
+            compression,
+            img_format,
+            width,
+            height,
+            retry,
+            preprocess_mode,
+            grayscale,
+        )
 
     for source in sorted_sources:
         found_source_name = source.get("sourceName")
@@ -812,7 +872,18 @@ def get_screenshot_PIL(
             logger.warning(f"Failed to validate image from source '{found_source_name}': {e}")
             return source if return_source_dict else img
 
-    return None
+    if return_source_dict:
+        return None
+    return _get_scene_composite_screenshot(
+        current_scene_name,
+        compression,
+        img_format,
+        width,
+        height,
+        retry,
+        preprocess_mode,
+        grayscale,
+    )
 
 
 # ---------------------------------------------------------------------------
