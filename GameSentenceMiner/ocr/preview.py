@@ -129,16 +129,24 @@ def capture_preview(request: dict[str, Any]) -> dict[str, Any] | None:
         source_name = source.get("sourceName") if isinstance(source, dict) else None
         if not source_name:
             return None
-        image = obs.get_screenshot_PIL(
-            source_name=source_name,
-            width=960,
-            compression=70,
-            img_format="jpg",
-            retry=0,
-            preprocess_mode="none",
-            log_missing_source=False,
-            suppress_errors=True,
-        )
+        capture_options = {
+            "width": 960,
+            "compression": 70,
+            "img_format": "jpg",
+            "retry": 0,
+            "preprocess_mode": "none",
+            "log_missing_source": False,
+            "suppress_errors": True,
+        }
+        image = obs.get_screenshot_PIL(source_name=source_name, **capture_options)
+        if image is None:
+            # Some OBS inputs (notably PipeWire) render in the scene but cannot
+            # be screenshotted directly. Automatic capture can fall back to the
+            # rendered scene composite while preserving the source identity used
+            # to associate OCR geometry with this frame.
+            image = obs.get_screenshot_PIL(
+                **capture_options,
+            )
         if image is None or obs.get_current_scene() != scene_name:
             return None
         image.thumbnail((960, 720))

@@ -84,6 +84,35 @@ def test_frame_capture_is_read_only_source_scoped_and_preserves_aspect_ratio(mon
     assert len(calls) == 1
 
 
+def test_frame_capture_falls_back_to_automatic_scene_capture_when_source_is_blank(monkeypatch):
+    from GameSentenceMiner import obs
+
+    calls = []
+    monkeypatch.setattr(obs, "get_current_scene", lambda: "Game")
+    monkeypatch.setattr(
+        obs,
+        "get_source_from_scene",
+        lambda _scene: {
+            "sourceName": "Screen Capture (PipeWire)",
+            "inputKind": "pipewire-screen-capture-source",
+        },
+    )
+
+    def capture(**kwargs):
+        calls.append(kwargs)
+        if "source_name" in kwargs:
+            return None
+        return Image.new("RGB", (960, 540))
+
+    monkeypatch.setattr(obs, "get_screenshot_PIL", capture)
+
+    result = capture_preview({"sceneId": "id", "sceneName": "Game"})
+
+    assert result["imageData"].startswith("data:image/jpeg;base64,")
+    assert result["sourceName"] == "Screen Capture (PipeWire)"
+    assert [call.get("source_name") for call in calls] == ["Screen Capture (PipeWire)", None]
+
+
 def test_scene_changes_during_capture_cannot_return_the_old_game(monkeypatch):
     from GameSentenceMiner import obs
 
