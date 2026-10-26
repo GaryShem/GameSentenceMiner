@@ -38,16 +38,17 @@ function setup(t) {
     backend: { connected: true, send: data => effects.push(data.type) },
     gamepadNavigationActive: false, gamepadKeyboardToggleSuppressedUntil: 0,
     overlayFocusRequestVersion: 0,
+    pendingMagpieFocusRestore: null, magpieSession: null,
     manualHotkeyPressed: false, manualModeToggleState: false, isOverlayVisible: false,
     yomitanShown: false, yomitanForegroundActive: false, resizeMode: false,
     currentMagpieState: { active: false },
     isManualMode: () => false, isWindows: () => true, isMac: () => false, isLinux: () => false,
     setTrackedGameWindowState: state => { context.trackedGameWindowState = state; return state; },
     resetOverlayInteractionStateForHiddenGameWindow: () => { context.gamepadNavigationActive = false; },
-    releaseAllOverlayPauseRequests() {}, clearMagpieYomitanCloseVisibilityGuard() {},
+    releaseAllOverlayPauseRequests() {},
     cancelManualBackgroundShowWait() {}, cancelManualBackgroundRelease() {},
     revealAutomaticOverlayForSignal() {}, shouldKeepOverlayVisibleWhenManualInactive: () => false,
-    shouldDeferObscuredStateAfterYomitanClose: () => false,
+    shouldDeferObscuredStateForMagpieFocus: () => false,
     requestOverlayScanForActivation: () => effects.push('scan'),
     requestOverlayPauseForSource: () => effects.push('pause'),
     OVERLAY_PAUSE_SOURCE_GAMEPAD_NAVIGATION: 'gamepad',
@@ -58,17 +59,27 @@ function setup(t) {
   });
   const names = [
     'hasValidOverlayCapture', 'canUseOverlayCapture', 'publishOverlayCaptureAvailability',
+    'canTrackMagpiePointer', 'canRouteTextHover',
     'invalidateOverlayCapture', 'updateOverlayCaptureStatus', 'publishOverlaySocketState',
     'showOverlayUsingManualFlow', 'setGamepadNavigationModeActive',
     'reassertOverlayTopmostWithoutFocus', 'aggressivelyShowOverlayAndReturnFocus',
     'requestManualOverlayScan', 'requestManualModeBackground', 'restoreAutomaticOverlayPassThrough',
     'showInactiveAndRestoreFocus', 'focusOverlayForYomitanLookup',
+    'cancelPendingMagpieFocusRestore',
   ];
   loadFunctions(context, names);
   vm.runInContext(between(source, 'const GAMEPAD_FOCUS_RETRY_DELAYS_MS', 'let gamepadToggleRequestSeq'), context);
   vm.runInContext(between(source, '  ipcMain.on("show",', '  ipcMain.on("yomitan-event"'), context);
   return { context, effects, messages, ipcMain };
 }
+
+test('capture loss cancels an outstanding Magpie focus request', t => {
+  const { context, effects } = setup(t);
+  context.pendingMagpieFocusRestore = { requestId: 'pending-focus', timer: setTimeout(() => {}, 3000) };
+  context.invalidateOverlayCapture('test');
+  assert.equal(context.pendingMagpieFocusRestore, null);
+  assert.ok(effects.includes('restore-focus-cancel'));
+});
 
 function setupTextfeed(t) {
   const fixture = setup(t);
@@ -258,6 +269,13 @@ test('every reveal, scan, and focus entry rejects unconfirmed capture', t => {
   assert.ok(messages.some(([name]) => name === 'overlay-capture-state'));
 });
 
+test('unavailable capture heartbeats do not repeatedly hide an already hidden native window', t => {
+  const { context: c, effects } = setup(t);
+  effects.length = 0;
+  for (let i = 0; i < 4; i++) c.updateOverlayCaptureStatus({ available: false, window_state: 'obscured' });
+  assert.deepEqual(effects, []);
+});
+
 test('capture loss and heartbeat expiry cancel pending focus and reject stale entry', t => {
   const { context: c, effects } = setup(t);
   c.updateOverlayCaptureStatus({ available: true, window_state: 'active' });
@@ -414,7 +432,8 @@ test('renderer capture state suppresses controller and keyboard entry and clears
     let overlayCaptureAvailable = false, gamepadInputSuppressed = false;
     const dictionaryReader = 'yomitan', showFurigana = false, pendingManualRevealForBackground = false;
     const isManualInteractionSuppressed = () => false;
-    const cancelDeferredManualReveal = () => {}, closeYomitanLookups = () => {};
+    window.popupCloseRequests = 0;
+    const cancelDeferredManualReveal = () => {}, closeYomitanLookups = () => { window.popupCloseRequests++; };
     const updateGamepadStatusIndicator = () => {};
     const gamepadSettings = { enabled: true, controllerEnabled: true, keyboardEnabled: true };
     ${between(renderer, '  function shouldUseGamepadHandler()', '  async function ensureGamepadModuleLoaded()')}
@@ -432,6 +451,9 @@ test('renderer capture state suppresses controller and keyboard entry and clears
   handler.activateNavigation({ type: 'gamepad' });
   assert.equal(handler.isActive, true);
   listeners.get('overlay-capture-state')(null, { available: false });
+  const closeRequests = window.popupCloseRequests;
+  listeners.get('overlay-capture-state')(null, { available: false });
+  assert.equal(window.popupCloseRequests, closeRequests, 'unchanged heartbeats must not repeatedly close dictionary frames');
   assert.equal(handler.isActive, false);
   assert.equal(handler.toggleModeActive, false);
   assert.equal(handler.overlayFocusHeld, false);

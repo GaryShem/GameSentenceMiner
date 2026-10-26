@@ -261,16 +261,22 @@ background: rgba(202, 12, 12, 0.692);
   }
 
   body.force-visible .text-box,
-  body:hover .text-box {
+  body:not(.magpie-active):hover .text-box {
     background: rgba(15, 15, 15, 0.856);
     color: white;
     transition: opacity 0.3s ease;
   }
 
-  .text-box:hover {
+  body:not(.magpie-active) .text-box:hover {
     background: rgba(15, 15, 15, 0.856);
     color: white;
     transition: opacity 0.3s ease;
+  }
+
+  /* With text click-through disabled, Magpie needs a nontransparent pixel at
+     the lookup surface to hand its captured cursor back to the overlay. */
+  body.magpie-pointer-hover .text-box {
+    background: rgba(0, 0, 0, 0.004) !important;
   }
 
   body.manual-interaction-suppressed .text-box,
@@ -526,6 +532,11 @@ background: rgba(202, 12, 12, 0.692);
     border-top: 2px solid #00ff88;
     border-radius: 50%;
     animation: spin 1s linear infinite;
+  }
+
+  #loading-indicator:not(.show) .loading-spinner,
+  #loading-indicator:not(.show) .loading-dot {
+    animation: none;
   }
 
   .checkmark {
@@ -988,40 +999,21 @@ background: rgba(202, 12, 12, 0.692);
   let hideOnYomitanClose = false;
   // let currentX = 0;
   // let currentY = 0;
-  let magpieReleaseInterval = null;
   let magpieController = null;
   let manualModeActivatedOnce = false;
   let shouldShowReadyIndicator = true;
 
-  // ── Magpie coordinate architecture ──────────────────────────────────
-  // Magpie is an external window upscaler.  When active, the game's
-  // source window occupies a small region while Magpie renders scaled
-  // output across the full screen.
-  //
-  // The Python backend always sends coordinates as source-window-relative
-  // monitor percentages (no Magpie mapping).  This frontend handles two
-  // coordinate spaces:
-  //
-  //   • Text rendering  → mapPercentToMagpie() maps source % to Magpie
-  //                        destination %, so characters appear on the
-  //                        upscaled image.
-  //   • Interactive area → stays at the original source-window position
-  //                        (with padding) so mouse events forward to the
-  //                        game correctly.
-  //
-  // updateMagpieCompatibility() manages a periodic mouse-release timer
-  // that ensures click-through keeps working when Magpie intercepts
-  // mouse events.
-  // ────────────────────────────────────────────────────────────────────
+  // Backend coordinates stay in source space. A shared physical-pixel
+  // transform projects text; native cursor samples hit-test that rendered text.
   let currentMagpieInfo = null;
   let isMagpieActive = false;
+  let textHoverClickThrough = true;
   const CJK_LEXICAL_REGEX = /[\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script_Extensions=Han}\p{Script_Extensions=Hangul}]/u;
   const LATIN_NUMERIC_REGEX = /[A-Za-z0-9]/;
 
-  function requestMagpieMouseRelease(reason = 'magpie-compat') {
+  function requestOverlayMouseRelease(reason = 'magpie-compat') {
     ipcRenderer.send('set-ignore-mouse-events', true, {
       forward: true,
-      forceMagpieRelease: true,
       reason,
     });
   }
@@ -1037,7 +1029,7 @@ background: rgba(202, 12, 12, 0.692);
     }
 
     if (isMagpieActive) {
-      requestMagpieMouseRelease(reason);
+      requestOverlayMouseRelease(reason);
     } else {
       ipcRenderer.send('set-ignore-mouse-events', true, { forward: true, reason });
     }
@@ -1103,51 +1095,9 @@ background: rgba(202, 12, 12, 0.692);
    * @returns {{x: number, y: number}}
    */
   function mapPercentToMagpie(pX, pY) {
-    if (magpieController) {
-      return magpieController.mapPercent(pX, pY, display);
-    }
-
-    if (!isMagpieActive || !currentMagpieInfo) {
-      return { x: pX, y: pY };
-    }
-    const srcL = currentMagpieInfo.sourceWindowLeftEdgePosition;
-    const srcT = currentMagpieInfo.sourceWindowTopEdgePosition;
-    const srcR = currentMagpieInfo.sourceWindowRightEdgePosition;
-    const srcB = currentMagpieInfo.sourceWindowBottomEdgePosition;
-    const dstL = currentMagpieInfo.magpieWindowLeftEdgePosition;
-    const dstT = currentMagpieInfo.magpieWindowTopEdgePosition;
-    const dstR = currentMagpieInfo.magpieWindowRightEdgePosition;
-    const dstB = currentMagpieInfo.magpieWindowBottomEdgePosition;
-    const srcW = srcR - srcL;
-    const srcH = srcB - srcT;
-    const dstW = dstR - dstL;
-    const dstH = dstB - dstT;
-    if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) {
-      return { x: pX, y: pY };
-    }
-    const physicalDisplaySize = (
-      display &&
-      display.physicalSize &&
-      Number(display.physicalSize.width) > 0 &&
-      Number(display.physicalSize.height) > 0
-    )
-      ? display.physicalSize
-      : {
-          width: (window.screen.width || window.innerWidth) * (window.devicePixelRatio || 1),
-          height: (window.screen.height || window.innerHeight) * (window.devicePixelRatio || 1),
-        };
-    const monW = physicalDisplaySize.width;
-    const monH = physicalDisplaySize.height;
-    const absX = (pX / 100) * monW;
-    const absY = (pY / 100) * monH;
-    const mappedX = dstL + ((absX - srcL) / srcW) * dstW;
-    const mappedY = dstT + ((absY - srcT) / srcH) * dstH;
-    return {
-      x: (mappedX / monW) * 100,
-      y: (mappedY / monH) * 100,
-    };
+    return magpieController.mapPercent(pX, pY, display);
   }
-  
+
   // Track multiple Yomitan popups for nested lookups
   let yomitanPopupCount = 0;
   let yomitanPopupIds = new Set(); // Track unique popup IDs to prevent double-counting
@@ -1457,7 +1407,7 @@ background: rgba(202, 12, 12, 0.692);
       console.log('Resetting stale Yomitan state - triggering cleanup');
       ipcRenderer.send('yomitan-event', false);
       if (isMagpieActive && !manualHotkeyPressed) {
-        requestMagpieMouseRelease('stale-yomitan-reset');
+        requestOverlayMouseRelease('stale-yomitan-reset');
       }
       
       if (hideOnYomitanClose) {
@@ -1524,7 +1474,7 @@ background: rgba(202, 12, 12, 0.692);
 
       ipcRenderer.send('yomitan-event', false);
       if (isMagpieActive && !manualHotkeyPressed) {
-        requestMagpieMouseRelease('dictionary-popup-hidden');
+        requestOverlayMouseRelease('dictionary-popup-hidden');
       }
 
       if (hideOnYomitanClose) {
@@ -1656,7 +1606,6 @@ background: rgba(202, 12, 12, 0.692);
     const MagpieUtils = require("./magpie.js");
     window.GSMMagpie = MagpieUtils;
     magpieController = MagpieUtils.createMagpieRendererController({
-      requestMouseRelease: requestMagpieMouseRelease,
       restoreMouseIgnore(reason) {
         ipcRenderer.send('set-ignore-mouse-events', true, { forward: true, reason });
       },
@@ -1668,8 +1617,31 @@ background: rgba(202, 12, 12, 0.692);
       },
     });
   } catch (e) {
-    console.warn("Could not require magpie.js:", e);
+    throw new Error("Magpie coordinate module failed to load", { cause: e });
   }
+
+  const { magpiePointerToViewport } = require('./magpie_hit_test');
+  const { createTextHoverController } = require('./text_hover');
+  const textHover = createTextHoverController({ window, document,
+    isClickThroughEnabled: () => textHoverClickThrough,
+    onIgnore: ignore => ipcRenderer.send('text-hover-ignore', ignore, textHoverClickThrough) });
+  ipcRenderer.on('text-hover-refresh', () => textHover.refresh());
+  ipcRenderer.on('magpie-pointer', (_event, sample) => {
+    if (sample.signature !== magpieController.getState().signature) {
+      ipcRenderer.send('magpie-pointer-hit', { sequence: sample.sequence, hit: false });
+      return;
+    }
+    const point = magpiePointerToViewport(sample, display, window);
+    const hit = textHover.project(point || { ...sample, x: -1, y: -1 });
+    document.body.classList.toggle('magpie-pointer-hover', hit && !textHoverClickThrough);
+    // Cursor projection stays active with either mouse policy. When enabled,
+    // click-through affects game text only; dictionary controls still capture.
+    ipcRenderer.send('magpie-pointer-hit', { sequence: sample.sequence, hit });
+  });
+  ipcRenderer.on('magpie-pointer-reset', () => {
+    textHover.reset();
+    document.body.classList.remove('magpie-pointer-hover');
+  });
 
   const dragBar = document.getElementById("draggable");
   const textEl = document.getElementById("text");
@@ -1779,9 +1751,9 @@ background: rgba(202, 12, 12, 0.692);
   // Listen for mining success signal from Yomitan extension
   window.addEventListener('gsm-anki-note-added', (event) => {
     console.log('Received mining success signal');
-    if (hideYomitanAfterMine && OverlayUtils) {
+    if (hideYomitanAfterMine === true) {
       if (dictionaryReader === 'hachidori') void window.gsmHachidoriBridge?.closePopups().catch(console.warn);
-      else OverlayUtils.hideYomitan();
+      else void closeYomitanLookups('note-added');
     }
   });
   // Bridge: listen for postMessage from Yomitan iframe/extension and re-dispatch as CustomEvent
@@ -2583,21 +2555,12 @@ background: rgba(202, 12, 12, 0.692);
       const result = magpieController.applyInfo(rawInfo, reason);
       currentMagpieInfo = result.state.info;
       isMagpieActive = result.state.active;
+      document.body.classList.toggle('magpie-active', isMagpieActive);
+      if (!isMagpieActive) document.body.classList.remove('magpie-pointer-hover');
       return result;
     }
 
-    const oldMagpieActive = isMagpieActive;
-    currentMagpieInfo = rawInfo;
-    isMagpieActive = currentMagpieInfo !== null && currentMagpieInfo !== undefined;
-    return {
-      activeChanged: oldMagpieActive !== isMagpieActive,
-      signatureChanged: oldMagpieActive !== isMagpieActive,
-      state: {
-        active: isMagpieActive,
-        info: currentMagpieInfo,
-        signature: null,
-      },
-    };
+    throw new Error("Magpie coordinate controller is unavailable");
   }
 
   function clampNumber(value, fallback, min, max) {
@@ -3017,7 +2980,7 @@ background: rgba(202, 12, 12, 0.692);
       boundaries,
       isBlockStart,
       isBlockEnd,
-      wordList,
+      wordList: useLexicalWordBoxes ? wordList : expandCjkCharacterHitboxes(wordList, isVertical),
       blockCount,
       isVertical,
     };
@@ -3167,9 +3130,7 @@ background: rgba(202, 12, 12, 0.692);
               console.log("Magpie state changed:", result.state.signature || "inactive");
             }
 
-            if (!magpieController && (result.activeChanged || result.signatureChanged)) {
-              updateMagpieCompatibility(isMagpieActive);
-            }
+
           }
           
           ipcRenderer.send("window-state-changed", {
@@ -3177,6 +3138,7 @@ background: rgba(202, 12, 12, 0.692);
             game: data.game,
             magpieActive: isMagpieActive,
             magpieInfo: currentMagpieInfo,
+            targetHwnd: data.target_hwnd || null,
             isFullscreen: data.is_fullscreen || false,
             isExclusiveFullscreen: data.is_exclusive_fullscreen || false,
             cursorHidden: data.cursor_hidden || false,
@@ -3418,8 +3380,6 @@ background: rgba(202, 12, 12, 0.692);
             
             const rect = line.bounding_rect;
             let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
-            // Track original (source-window) bounds separately for interactive area
-            let origMinx = Infinity, origMiny = Infinity, origMaxx = -Infinity, origMaxy = -Infinity;
             let bigInteractiveArea = document.createElement("div");
             bigInteractiveArea.className = "big-interactive-area interactive half-interactive";
 
@@ -3434,12 +3394,6 @@ background: rgba(202, 12, 12, 0.692);
               const origY1 = rect.y1 * 100;
               const origX3 = rect.x3 * 100;
               const origY3 = rect.y3 * 100;
-
-              // Track original bounds for interactive area (always source position)
-              origMinx = Math.min(origMinx, origX1);
-              origMiny = Math.min(origMiny, origY1);
-              origMaxx = Math.max(origMaxx, origX3);
-              origMaxy = Math.max(origMaxy, origY3);
 
               // Map to Magpie-scaled position for rendering (identity when Magpie inactive)
               const tl = mapPercentToMagpie(origX1, origY1);
@@ -3469,6 +3423,7 @@ background: rgba(202, 12, 12, 0.692);
                 text: word.text,
                 widthPercent: x3 - x1,
                 heightPercent: y3 - y1,
+                fitCharacterHitbox: word.fitCharacterHitbox === true,
                 x1,
                 y1,
                 y3,
@@ -3499,20 +3454,9 @@ background: rgba(202, 12, 12, 0.692);
               });
             }
 
-            // When Magpie is active, position the interactive area at the
-            // original (source-window) location so mouse events forward to
-            // the game correctly.  Text boxes are rendered at the scaled
-            // Magpie destination and handle Yomitan interaction directly.
-            if (isMagpieActive && currentMagpieInfo) {
-              const iaPad = 2.0; // percentage points of padding each side
-              bigInteractiveArea.style.position = 'absolute';
-              bigInteractiveArea.style.left   = `${origMinx - iaPad}%`;
-              bigInteractiveArea.style.top    = `${origMiny - iaPad}%`;
-              bigInteractiveArea.style.width  = `${(origMaxx - origMinx) + iaPad * 2}%`;
-              bigInteractiveArea.style.height = `${(origMaxy - origMiny) + iaPad * 2}%`;
-            }
-
-            document.body.appendChild(bigInteractiveArea);
+            // Magpie input uses the actual rendered boxes, without hidden
+            // source-plane padding or catch-all click targets.
+            if (!isMagpieActive) document.body.appendChild(bigInteractiveArea);
           }
 
           // Attach every character before measuring any of them. These boxes
@@ -3692,6 +3636,7 @@ background: rgba(202, 12, 12, 0.692);
     textBox.style.overflow = 'visible';
     textBox.style.whiteSpace = 'nowrap';
     textBox.style.fontSize = '48px';
+    textBox.style.letterSpacing = '';
     textBox.style.lineHeight = '1';
     textBox.style.background = 'rgba(0,0,0,0)';
     textBox.style.border = 'none';
@@ -3808,6 +3753,51 @@ background: rgba(202, 12, 12, 0.692);
       cursor += span * (weights[i] / totalWeight);
     }
     return edges;
+  }
+
+  function expandCjkCharacterHitboxes(units, isVertical) {
+    const startKey = isVertical ? 'y1' : 'x1';
+    const endKey = isVertical ? 'y3' : 'x3';
+    const alongPixels = isVertical ? window.innerHeight : window.innerWidth;
+    const crossPixels = isVertical ? window.innerWidth : window.innerHeight;
+    if (!(alongPixels > 0 && crossPixels > 0)) return units;
+    const isFullWidthLetter = text => /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー]$/u.test(text)
+      && !/[\uFF61-\uFF9F]/u.test(text);
+
+    // OCR often gives ink-tight bounds, leaving part of a full-width character
+    // outside its lookup target. Keep its recognized start fixed and extend
+    // only the trailing edge toward the next character (right, or down in a
+    // vertical column), leaving a small gap before the next recognized start.
+    // Work from the original bounds so padding never compounds across characters
+    // or OCR retries. Keep punctuation, spaces and half-width text unchanged.
+    let extended = false;
+    const extendedUnits = units.map((unit, index) => {
+      const next = units[index + 1];
+      if (!isFullWidthLetter(unit.text) || !isFullWidthLetter(next?.text) || !next.bounding_rect) return unit;
+      const rect = unit.bounding_rect;
+      const span = rect[endKey] - rect[startKey];
+      // Convert the cross-axis extent into along-axis units before comparing:
+      // normalized X and Y coordinates use different viewport dimensions.
+      const crossSpan = (isVertical ? rect.x3 - rect.x1 : rect.y3 - rect.y1) * crossPixels / alongPixels;
+      if (!(span > 0 && Number.isFinite(crossSpan) && crossSpan > span)) return unit;
+      const gap = next.bounding_rect[startKey] - rect[endKey];
+      // Large gaps may separate words or labels. Do not bridge them or extend
+      // touching/overlapping boxes. Cap growth to 40% of the glyph's cross-axis
+      // size and stop once the box is a full-width cell.
+      if (!(gap > 1e-9 && gap <= crossSpan * 0.5)) return unit;
+      const padding = Math.min(gap * 0.8, crossSpan * 0.4, crossSpan - span);
+      if (!(padding > 1e-9)) return unit;
+      extended = true;
+      return {
+        ...unit,
+        bounding_rect: { ...rect, [endKey]: rect[endKey] + padding },
+      };
+    });
+    // Fit all full-width letters on an adjusted line, including its unchanged
+    // final character, whose median-sized text could otherwise overflow left
+    // into the preceding character's newly extended lookup area.
+    return extended ? extendedUnits.map(unit => isFullWidthLetter(unit.text)
+      ? { ...unit, fitCharacterHitbox: true } : unit) : units;
   }
 
   function buildLexicalWordRenderUnits(words, lineText, appendTrailingSpace = false) {
@@ -4013,6 +4003,17 @@ background: rgba(202, 12, 12, 0.692);
         ? Math.round(lineFontSize)
         : lineWordBox.estimatedFontSize;
       lineWordBox.box.style.fontSize = `${effectiveFontSize}px`;
+      if (lineWordBox.fitCharacterHitbox) {
+        // Yomitan scans text ranges, not just element bounds. Full-width glyphs
+        // advance by 1em; adjust that advance to fill the padded cell while
+        // retaining the line's font size. This also prevents a wider median
+        // glyph from overflowing a narrower neighbor and stealing its lookup.
+        const measuredExtent = isVertical ? lineWordBox.boundBox.height : lineWordBox.boundBox.width;
+        const extent = measuredExtent > 0 ? measuredExtent : (isVertical
+          ? lineWordBox.heightPercent * window.innerHeight / 100
+          : lineWordBox.widthPercent * window.innerWidth / 100);
+        lineWordBox.box.style.letterSpacing = `${extent - effectiveFontSize}px`;
+      }
 
       if (!keepNaturalSize && uniformExtentPercent > 0) {
         const clampedStart = Math.max(0, Math.min(100 - uniformExtentPercent, uniformStartPercent));
@@ -4462,6 +4463,7 @@ background: rgba(202, 12, 12, 0.692);
 
 
   function setMouseEventHandlers() {
+    textHover.refresh();
     const interactiveElements = document.querySelectorAll('.interactive');
     const halfInteractiveElements = document.querySelectorAll('.half-interactive');
     const textBoxElements = document.querySelectorAll('.text-box');
@@ -4788,6 +4790,8 @@ background: rgba(202, 12, 12, 0.692);
   ipcRenderer.on("load-settings", (event, newsettings) => {
     dictionaryReader = normalizeDictionaryReader(newsettings.dictionaryReader);
     applyFloatingWindowFontSize(newsettings.fontSize);
+    textHoverClickThrough = newsettings.textHoverClickThrough !== false;
+    textHover.refresh();
     setupWebSocket(newsettings.weburl1, true)
     setupWebSocket(newsettings.weburl2, false)
     hideOnStartup = newsettings.hideOnStartup;
@@ -4850,9 +4854,7 @@ background: rgba(202, 12, 12, 0.692);
       furiganaOutlineColor: newsettings.furiganaOutlineColor,
       furiganaOutlineWidth: newsettings.furiganaOutlineWidth,
     });
-    if (newsettings.hideYomitanAfterMine !== undefined) {
-      hideYomitanAfterMine = newsettings.hideYomitanAfterMine;
-    }
+    hideYomitanAfterMine = newsettings.hideYomitanAfterMine === true;
     
     // Load gamepad settings
     if (newsettings.gamepadEnabled !== undefined) {
@@ -5006,27 +5008,6 @@ background: rgba(202, 12, 12, 0.692);
     updateImmediateRecycledIndicator();
     applyManualInactivePresentation('settings-load');
 
-    if (magpieController) {
-      magpieController.syncCompatibility('settings-load');
-    } else {
-      if (magpieReleaseInterval) {
-        clearInterval(magpieReleaseInterval);
-      }
-
-      // Initialize magpie interval based on current websocket state (isMagpieActive)
-      // This will be updated dynamically when window_state messages arrive
-      if (isMagpieActive) {
-        if (!yomitanShowing && !manualHotkeyPressed) {
-          requestMagpieMouseRelease('settings-load');
-        }
-        magpieReleaseInterval = setInterval(() => {
-          if (!yomitanShowing && !manualHotkeyPressed) {
-            requestMagpieMouseRelease('settings-load-interval');
-          }
-        }, 1000);
-      }
-    }
-    
     // Initialize gamepad handler now that settings are loaded
     void initGamepad();
     scheduleGsmCharacterDictionaryEnsure('startup');
@@ -5053,6 +5034,11 @@ background: rgba(202, 12, 12, 0.692);
       const value = updatedSettings[key];
 
       switch (key) {
+        case "textHoverClickThrough":
+          textHoverClickThrough = value !== false;
+          if (textHoverClickThrough) document.body.classList.remove('magpie-pointer-hover');
+          textHover.refresh();
+          break;
         case "fontSize":
           applyFloatingWindowFontSize(value);
           break;
@@ -5189,7 +5175,7 @@ background: rgba(202, 12, 12, 0.692);
           applyFuriganaStyleSettings({ [key]: value });
           break;
         case "hideYomitanAfterMine":
-          hideYomitanAfterMine = value;
+          hideYomitanAfterMine = value === true;
           break;
         case "showRecycledIndicator":
           showRecycledIndicator = value;
@@ -5204,37 +5190,6 @@ background: rgba(202, 12, 12, 0.692);
       }
     });
   });
-
-  function updateMagpieCompatibility(newValue) {
-    // Manages the periodic mouse-release timer when Magpie is active.
-    // Magpie intercepts mouse events, so we periodically release mouse
-    // control back to it when the user isn't interacting with Yomitan.
-    console.log("Magpie compatibility behavior update - Active:", newValue);
-
-    if (magpieController) {
-      magpieController.syncCompatibility('magpie-compatibility');
-      const state = magpieController.getState();
-      currentMagpieInfo = state.info;
-      isMagpieActive = state.active;
-      return;
-    }
-
-    if (magpieReleaseInterval) {
-      clearInterval(magpieReleaseInterval);
-      magpieReleaseInterval = null;
-    }
-
-    if (newValue) {
-      if (!yomitanShowing && !manualHotkeyPressed) {
-        requestMagpieMouseRelease('magpie-compat-start');
-      }
-      magpieReleaseInterval = setInterval(() => {
-        if (!yomitanShowing && !manualHotkeyPressed) {
-          requestMagpieMouseRelease('magpie-compat-interval');
-        }
-      }, 1000);
-    }
-  }
 
   function updateManualMode(newValue) {
     manualMode = newValue;
@@ -5313,6 +5268,7 @@ background: rgba(202, 12, 12, 0.692);
   })
 
   ipcRenderer.on('show-overlay-hotkey', (event, isActive, options) => {
+    textHover.reset();
     manualHotkeyPressed = isActive;
     if (manualHotkeyPressed) {
       manualModeActivatedOnce = true;
@@ -5935,6 +5891,7 @@ background: rgba(202, 12, 12, 0.692);
       },
       
       onModeChange: (data) => {
+        textHover.reset();
         console.log('[Gamepad] Navigation mode:', data.active ? 'ACTIVE' : 'INACTIVE');
         updateGamepadStatusIndicator();
         ipcRenderer.send('gamepad-navigation-state', { active: !!data.active });
@@ -6146,7 +6103,9 @@ background: rgba(202, 12, 12, 0.692);
 
   // IPC: Temporarily suppress gamepad handling while settings input test runs.
   ipcRenderer.on('overlay-capture-state', (event, payload) => {
-    overlayCaptureAvailable = payload?.available === true;
+    const available = payload?.available === true;
+    if (available === overlayCaptureAvailable) return;
+    overlayCaptureAvailable = available;
     gamepadHandler?.setInputSuppressed(gamepadInputSuppressed || !overlayCaptureAvailable);
     if (!overlayCaptureAvailable) {
       cancelDeferredManualReveal();
